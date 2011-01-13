@@ -3,13 +3,21 @@
 
 ################################################################################
 #
-# Usage: findex.py command database [direcory | file]
+# Usage: findex.py command database [path]
 # Commands:
-# index - Update database with files from directory
+# index - Index files under path, store hash values into the database
+# duplicates (dups) - find duplicate file entries in the database
 # query - ...
 #
-# 2DO: Implement searching, indexing progress bar, add logging support
-# command line options and stuff
+# 2DO:
+# - [ ] Implement searching
+# - [ ] double-pass indexing
+#       First pass: count the number of files, update entries
+#       for files that didn't change from the last indexing
+#       Second pass:
+#       Calculate hashes for new and changed files, insert new entries.
+#       Should I add indexing progress bar?
+# - [ ] Print indexing stats in the end
 #
 # Kirill Gorelov <kgorelov@gmail.com>
 ################################################################################
@@ -17,6 +25,7 @@
 
 import os
 import os.path
+import optparse
 import time
 import sys
 import hashlib
@@ -105,6 +114,7 @@ class FIndexDB:
             if r[0] != sha1:
                 print "--------------------------------------------------------------------------------"
                 sha1=r[0]
+            #print "%s %s" % (r[0], r[1].decode('utf-8'))
             print "%s %s" % (r[0], r[1])
 
 class FIndexer:
@@ -134,13 +144,43 @@ class FIndexer:
 
 ################################################################################
 
+class Main:
+    def __init__(self):
+        usage = "usage: %prog command database [path]"
+        parser = optparse.OptionParser(usage=usage)
 
-database = FIndexDB("~/tmp/findexdb")
-indexer = FIndexer(database, "/home/kgorelov/tmp", int(time.time()))
-indexer.index()
+        (self.options, self.arguments) = parser.parse_args()
 
-database.print_duplicates()
+        if len(self.arguments) < 2:
+            parser.print_help();
+            sys.exit(1);
 
-#if __name__ == "__main__":
-#    main = Main()
-#    sys.exit(main.run())
+        # Start url
+        self.cmd = self.arguments[0]
+        self.dbfile = self.arguments[1]
+        self.pathname = self.arguments[2] if len(self.arguments) >= 3 else None 
+
+        # Set unbuffered stdout (XXX FIXME: breaks utf8, need to use condecs instead)
+        # sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
+
+    def run(self):
+        if self.cmd == 'index':
+            self.index()
+        elif self.cmd == 'duplicates' or self.cmd == 'dups':
+            self.printdups()
+        else:
+            print "Unknown command"
+            return 1
+
+    def index(self):
+        database = FIndexDB(self.dbfile)
+        indexer = FIndexer(database, self.pathname, int(time.time()))
+        indexer.index()
+
+    def printdups(self):
+        database = FIndexDB(self.dbfile)
+        database.print_duplicates()
+
+if __name__ == "__main__":
+    main = Main()
+    sys.exit(main.run())
