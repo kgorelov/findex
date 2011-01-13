@@ -59,7 +59,7 @@ class FIndexDB:
     def create_db(self, cursor = None):
         cur = cursor if cursor is not None else self.conn.cursor()
         # Create tables when needed
-        cur.execute("create table if not exists files (sha1 TEXT primary key, name TEXT, size INTEGER, ctime INTEGER, generation INTEGER)")
+        cur.execute("create table if not exists files (sha1 TEXT, name TEXT, size INTEGER, ctime INTEGER, generation INTEGER)")
 
     def lock_exclusive(self):
         self.conn.isolation_level = "EXCLUSIVE"
@@ -68,7 +68,7 @@ class FIndexDB:
         if fentry.sha1 is None:
             raise Exception("File entry is not hashed")
         cur = self.conn.cursor()
-        cur.execute("replace into files values (?, ?, ?, ?, ?)",
+        cur.execute("insert into files values (?, ?, ?, ?, ?)",
                     (fentry.sha1,
                      fentry.filename.decode('utf-8'),
                      fentry.size,
@@ -94,6 +94,18 @@ class FIndexDB:
         cur.execute("create index if not exists fileidx on files (name, size, ctime)")
         self.conn.commit()
 
+    def print_duplicates(self):
+        cur = self.conn.cursor()
+        #cur.execute('select * from files where sha1 in (select sha1 from files group by sha1 having (count(sha1) > 1))')
+        cur.execute('select sha1, name from files where sha1 in (select sha1 from files group by sha1 having (count(sha1) > 1))')
+        sha1 = None
+        print "--------------------------------------------------------------------------------"
+        print "DUPLICATES:"
+        for r in cur.fetchall():
+            if r[0] != sha1:
+                print "--------------------------------------------------------------------------------"
+                sha1=r[0]
+            print "%s %s" % (r[0], r[1])
 
 class FIndexer:
     def __init__(self, database, directory, generation):
@@ -113,7 +125,7 @@ class FIndexer:
             p = os.path.join(dirname, filename)
             if not os.path.isfile(p):
                 continue
-            print "Indexing: %s" % p
+            print "A %s" % p
             fe = FileEntry(p)
             fe.hash()
             self.idxdb.store(fe, self.generation)
@@ -127,6 +139,7 @@ database = FIndexDB("~/tmp/findexdb")
 indexer = FIndexer(database, "/home/kgorelov/tmp", int(time.time()))
 indexer.index()
 
+database.print_duplicates()
 
 #if __name__ == "__main__":
 #    main = Main()
