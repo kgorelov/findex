@@ -31,6 +31,7 @@ import sys
 import hashlib
 import sqlite3
 
+################################################################################
 
 class FileEntry:
     """
@@ -52,6 +53,7 @@ class FileEntry:
         f.close()
         self.sha1 = h.hexdigest()
 
+################################################################################
 
 class FIndexDB:
     """
@@ -73,6 +75,19 @@ class FIndexDB:
     def lock_exclusive(self):
         self.conn.isolation_level = "EXCLUSIVE"
 
+    def touch(self, fentry, generation):
+        cur = self.conn.cursor()
+        cur.execute("update files set generation=? where name=? and size=? and ctime=?",
+                    (generation,
+                     fentry.filename.decode('utf-8'),
+                     fentry.size,
+                     fentry.ctime))
+        if cur.rowcount:
+            print "U %s" % fentry.filename
+            return True
+
+        return False
+
     def store(self, fentry, generation):
         if fentry.sha1 is None:
             raise Exception("File entry is not hashed")
@@ -83,9 +98,7 @@ class FIndexDB:
                      fentry.size,
                      fentry.ctime,
                      generation))
-
-    def has_entry_unrel(self, fentry):
-        pass
+        print "A %s" % fentry.filename
 
     def lookup(self, fentry):
         # XXX 2DO: Impplement ME
@@ -96,9 +109,15 @@ class FIndexDB:
         cur.execute("drop index if exists sha1idx")
         cur.execute("drop index if exists fileidx")
 
-    def commit(self, generation):
+    def purge(self, generation):
         cur = self.conn.cursor()
+        cur.execute("select name from files where generation <> ?", (generation,))
+        for f in cur.fetchall():
+            print "D %s" % f;
         cur.execute("delete from files where generation <> ?", (generation,))
+
+    def commit(self):
+        cur = self.conn.cursor()
         cur.execute("create index if not exists sha1idx on files (sha1)")
         cur.execute("create index if not exists fileidx on files (name, size, ctime)")
         self.conn.commit()
@@ -108,14 +127,14 @@ class FIndexDB:
         #cur.execute('select * from files where sha1 in (select sha1 from files group by sha1 having (count(sha1) > 1))')
         cur.execute('select sha1, name from files where sha1 in (select sha1 from files group by sha1 having (count(sha1) > 1))')
         sha1 = None
-        print "--------------------------------------------------------------------------------"
-        print "DUPLICATES:"
         for r in cur.fetchall():
             if r[0] != sha1:
-                print "--------------------------------------------------------------------------------"
+                if sha1 is not None:
+                    print
                 sha1=r[0]
-            #print "%s %s" % (r[0], r[1].decode('utf-8'))
             print "%s %s" % (r[0], r[1])
+
+################################################################################
 
 class FIndexer:
     def __init__(self, database, directory, generation):
@@ -127,7 +146,8 @@ class FIndexer:
         self.idxdb.lock_exclusive()
         self.idxdb.drop_indexes()
         os.path.walk(self.idxdir, self.process_directory, None)
-        self.idxdb.commit(self.generation)
+        self.idxdb.purge(self.generation)
+        self.idxdb.commit()
 
     def process_directory ( self, args, dirname, filenames ):
         #print 'Directory',dirname
@@ -135,12 +155,10 @@ class FIndexer:
             p = os.path.join(dirname, filename)
             if not os.path.isfile(p):
                 continue
-            print "A %s" % p
             fe = FileEntry(p)
-            fe.hash()
-            self.idxdb.store(fe, self.generation)
-            #print 'File: %s [%s]' % (filename, hash_file(p))
-
+            if not self.idxdb.touch(fe, self.generation):
+                fe.hash()
+                self.idxdb.store(fe, self.generation)
 
 ################################################################################
 
