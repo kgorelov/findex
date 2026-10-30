@@ -185,6 +185,67 @@ func (d *DB) ReconcileStaleEntries(ctx context.Context, volumeID, rootPath, scan
 	return res.RowsAffected()
 }
 
+// EntryMetadata holds cached file attributes and fingerprints for fast change detection.
+type EntryMetadata struct {
+	EntryType        model.EntryType
+	SizeBytes        int64
+	MTimeNs          int64
+	QuickFingerprint []byte
+	FullFingerprint  []byte
+}
+
+// GetSubtreeMetadata loads cached metadata for all entries under rootPath for volumeID.
+func (d *DB) GetSubtreeMetadata(ctx context.Context, volumeID, rootPath string) (map[string]*EntryMetadata, error) {
+	var query string
+	var args []any
+
+	if rootPath == "/" || rootPath == "" {
+		query = `
+			SELECT relative_path, entry_type, size_bytes, mtime_ns, quick_fingerprint, full_fingerprint
+			FROM entries
+			WHERE volume_id = ?
+		`
+		args = []any{volumeID}
+	} else {
+		prefix := strings.TrimSuffix(rootPath, "/")
+		query = `
+			SELECT relative_path, entry_type, size_bytes, mtime_ns, quick_fingerprint, full_fingerprint
+			FROM entries
+			WHERE volume_id = ?
+			  AND (relative_path = ? OR relative_path LIKE ? || '/%')
+		`
+		args = []any{volumeID, prefix, prefix}
+	}
+
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying subtree metadata under %s: %w", rootPath, err)
+	}
+	defer rows.Close()
+
+	results := make(map[string]*EntryMetadata)
+	for rows.Next() {
+		var path string
+		var entryType int
+		var sizeBytes, mtimeNs sql.NullInt64
+		var quickFP, fullFP []byte
+
+		if err := rows.Scan(&path, &entryType, &sizeBytes, &mtimeNs, &quickFP, &fullFP); err != nil {
+			return nil, fmt.Errorf("failed scanning subtree metadata row: %w", err)
+		}
+
+		results[path] = &EntryMetadata{
+			EntryType:        model.EntryType(entryType),
+			SizeBytes:        sizeBytes.Int64,
+			MTimeNs:          mtimeNs.Int64,
+			QuickFingerprint: quickFP,
+			FullFingerprint:  fullFP,
+		}
+	}
+
+	return results, rows.Err()
+}
+
 // GetEntry retrieves an entry by volume ID and relative path.
 func (d *DB) GetEntry(ctx context.Context, volumeID, relativePath string) (*model.Entry, error) {
 	rel := model.NormalizeRelativePath(relativePath)

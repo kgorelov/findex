@@ -36,12 +36,15 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database at %q: %w", path, err)
 	}
 
-	// Apply essential pragmas
+	// Apply essential pragmas for high performance and durability in WAL mode
 	pragmas := []string{
 		"PRAGMA foreign_keys = ON;",
 		"PRAGMA journal_mode = WAL;",
 		"PRAGMA synchronous = NORMAL;",
 		"PRAGMA busy_timeout = 5000;",
+		"PRAGMA cache_size = -64000;",   // 64 MiB page cache
+		"PRAGMA temp_store = MEMORY;",   // In-memory temp tables
+		"PRAGMA mmap_size = 268435456;", // 256 MiB memory mapping
 	}
 
 	for _, p := range pragmas {

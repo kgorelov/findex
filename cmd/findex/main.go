@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
@@ -209,6 +210,8 @@ across multiple storage volumes in SQLite.`,
 	var scanWorkers int
 	var scanBatchSize int
 	var scanFull bool
+	var scanFast bool
+	var scanVerify bool
 	var scanDryRun bool
 
 	scanCmd := &cobra.Command{
@@ -224,15 +227,38 @@ across multiple storage volumes in SQLite.`,
 			}
 			defer db.Close()
 
+			var progressFn func(scan.Progress)
+			if !jsonOut {
+				var lastReport time.Time
+				progressFn = func(p scan.Progress) {
+					now := time.Now()
+					if now.Sub(lastReport) < 200*time.Millisecond {
+						return
+					}
+					lastReport = now
+					fmt.Fprintf(os.Stderr, "\rScanning: %d entries (%d files, %d dirs, %d fast hits) ...",
+						p.EntriesScanned, p.FilesScanned, p.DirsScanned, p.FastHits)
+				}
+			}
+
 			scanner := scan.New(db)
 			summary, err := scanner.Run(context.Background(), scan.Options{
-				VolumeID:    scanVolID,
-				TargetDir:   targetDir,
-				Workers:     scanWorkers,
-				BatchSize:   scanBatchSize,
-				IncludeFull: scanFull,
-				DryRun:      scanDryRun,
+				VolumeID:     scanVolID,
+				TargetDir:    targetDir,
+				Workers:      scanWorkers,
+				BatchSize:    scanBatchSize,
+				IncludeFull:  scanFull,
+				FastMode:     scanFast,
+				StrictVerify: scanVerify,
+				DryRun:       scanDryRun,
+				ProgressFn:   progressFn,
 			})
+
+			if !jsonOut {
+				// Clear the progress line
+				fmt.Fprint(os.Stderr, "\r\033[K")
+			}
+
 			if err != nil {
 				return err
 			}
@@ -247,6 +273,8 @@ across multiple storage volumes in SQLite.`,
 	scanCmd.Flags().IntVar(&scanWorkers, "workers", runtime.NumCPU(), "Number of parallel fingerprint workers")
 	scanCmd.Flags().IntVar(&scanBatchSize, "batch-size", 500, "SQLite write batch size")
 	scanCmd.Flags().BoolVar(&scanFull, "full", false, "Compute full BLAKE3-256 fingerprints in addition to sparse fingerprints")
+	scanCmd.Flags().BoolVar(&scanFast, "fast", true, "Fast mode: reuse fingerprints if size & mtime match previous record")
+	scanCmd.Flags().BoolVar(&scanVerify, "verify", false, "Strict verify mode: force re-computing fingerprints regardless of metadata")
 	scanCmd.Flags().BoolVar(&scanDryRun, "dry-run", false, "Traverse and fingerprint without writing to database")
 	rootCmd.AddCommand(scanCmd)
 

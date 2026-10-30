@@ -17,6 +17,13 @@ func PrintScanSummary(out io.Writer, s *scan.Summary) error {
 	fmt.Fprintf(out, "  Root Path:       %s\n", s.RootPath)
 	fmt.Fprintf(out, "  Duration:        %s\n", s.Duration.Round(time.Millisecond))
 	fmt.Fprintf(out, "  Files:           %d (%s)\n", s.FilesCount, formatBytes(s.TotalBytes))
+	if s.FastHitsCount > 0 {
+		fmt.Fprintf(out, "    Fast Hits:     %d (reused without re-hashing)\n", s.FastHitsCount)
+	}
+	if s.BytesHashed > 0 && s.Duration.Seconds() > 0 {
+		throughput := float64(s.BytesHashed) / (1024 * 1024) / s.Duration.Seconds()
+		fmt.Fprintf(out, "    Hashed:        %s (%.2f MB/s)\n", formatBytes(s.BytesHashed), throughput)
+	}
 	fmt.Fprintf(out, "  Directories:     %d\n", s.DirsCount)
 	if s.SymlinksCount > 0 {
 		fmt.Fprintf(out, "  Symlinks:        %d\n", s.SymlinksCount)
@@ -26,6 +33,9 @@ func PrintScanSummary(out io.Writer, s *scan.Summary) error {
 	}
 	if s.ReconciledCount > 0 {
 		fmt.Fprintf(out, "  Reconciled:      %d stale entries removed\n", s.ReconciledCount)
+	}
+	if s.UnstableFilesCount > 0 {
+		fmt.Fprintf(out, "  Unstable Files:  %d (modified during read)\n", s.UnstableFilesCount)
 	}
 	if s.ErrorsCount > 0 {
 		fmt.Fprintf(out, "  Errors:          %d\n", s.ErrorsCount)

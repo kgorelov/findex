@@ -2,6 +2,7 @@ package scan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -15,34 +16,49 @@ import (
 	"github.com/kgorelov/findex/internal/volume"
 )
 
+// Progress holds real-time counters emitted during scan execution.
+type Progress struct {
+	EntriesScanned int64
+	BytesScanned   int64
+	FilesScanned   int64
+	FastHits       int64
+	DirsScanned    int64
+	Elapsed        time.Duration
+}
+
 // Options configures a scan operation.
 type Options struct {
-	VolumeID    string
-	TargetDir   string
-	Workers     int
-	BatchSize   int
-	IncludeFull bool
-	DryRun      bool
-	ProgressFn  func(entriesScanned int64, bytesScanned int64)
+	VolumeID     string
+	TargetDir    string
+	Workers      int
+	BatchSize    int
+	IncludeFull  bool
+	FastMode     bool // If true (default), reuse fingerprints if size & mtime match existing index
+	StrictVerify bool // If true, force re-computing fingerprints regardless of metadata
+	DryRun       bool
+	ProgressFn   func(p Progress)
 }
 
 // Summary contains final statistics and metadata for a completed or failed scan.
 type Summary struct {
-	ScanID          string           `json:"scan_id"`
-	VolumeID        string           `json:"volume_id"`
-	RootPath        string           `json:"root_path"`
-	Status          model.ScanStatus `json:"status"`
-	StartedAt       time.Time        `json:"started_at"`
-	CompletedAt     time.Time        `json:"completed_at"`
-	Duration        time.Duration    `json:"duration"`
-	FilesCount      int64            `json:"files_count"`
-	DirsCount       int64            `json:"dirs_count"`
-	SymlinksCount   int64            `json:"symlinks_count"`
-	OtherCount      int64            `json:"other_count"`
-	TotalBytes      int64            `json:"total_bytes"`
-	ReconciledCount int64            `json:"reconciled_count"`
-	ErrorsCount     int64            `json:"errors_count"`
-	ErrorMessage    string           `json:"error_message,omitempty"`
+	ScanID             string           `json:"scan_id"`
+	VolumeID           string           `json:"volume_id"`
+	RootPath           string           `json:"root_path"`
+	Status             model.ScanStatus `json:"status"`
+	StartedAt          time.Time        `json:"started_at"`
+	CompletedAt        time.Time        `json:"completed_at"`
+	Duration           time.Duration    `json:"duration"`
+	FilesCount         int64            `json:"files_count"`
+	DirsCount          int64            `json:"dirs_count"`
+	SymlinksCount      int64            `json:"symlinks_count"`
+	OtherCount         int64            `json:"other_count"`
+	TotalBytes         int64            `json:"total_bytes"`
+	FastHitsCount      int64            `json:"fast_hits_count"`
+	BytesHashed        int64            `json:"bytes_hashed"`
+	ReconciledCount    int64            `json:"reconciled_count"`
+	ErrorsCount        int64            `json:"errors_count"`
+	UnstableFilesCount int64            `json:"unstable_files_count"`
+	ErrorMessage       string           `json:"error_message,omitempty"`
 }
 
 // Scanner orchestrates parallel filesystem fingerprinting and atomic index updates.
@@ -126,7 +142,19 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		return s.failScan(ctx, scanRun, summary, fmt.Sprintf("filesystem walk error: %v", err), opts.DryRun)
 	}
 
-	// 5. Setup pipeline channels
+	// 5. Pre-load existing metadata for fast-path change detection
+	useFastPath := !opts.StrictVerify
+	var cachedMeta map[string]*index.EntryMetadata
+	if useFastPath && !opts.DryRun {
+		var metaErr error
+		cachedMeta, metaErr = s.db.GetSubtreeMetadata(ctx, vol.VolumeID, rootPath)
+		if metaErr != nil {
+			// If pre-loading fails, gracefully fallback to full hashing
+			useFastPath = false
+		}
+	}
+
+	// 6. Setup pipeline channels
 	fileTaskChan := make(chan *tree.Node, opts.Workers*4)
 	fileDoneChan := make(chan *tree.Node, opts.Workers*4)
 	writerChan := make(chan *model.Entry, opts.BatchSize*4)
@@ -139,11 +167,25 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		scanErrors = append(scanErrors, e.Error())
 	}
 
-	// 6. Start batch writer goroutine
-	var writerWg sync.WaitGroup
-	var writerErr error
 	var totalEntriesScanned int64
 	var totalBytesScanned int64
+
+	reportProgress := func() {
+		if opts.ProgressFn != nil {
+			opts.ProgressFn(Progress{
+				EntriesScanned: atomic.LoadInt64(&totalEntriesScanned),
+				BytesScanned:   atomic.LoadInt64(&totalBytesScanned),
+				FilesScanned:   atomic.LoadInt64(&summary.FilesCount),
+				FastHits:       atomic.LoadInt64(&summary.FastHitsCount),
+				DirsScanned:    atomic.LoadInt64(&summary.DirsCount),
+				Elapsed:        time.Since(startedAt),
+			})
+		}
+	}
+
+	// 7. Start batch writer goroutine
+	var writerWg sync.WaitGroup
+	var writerErr error
 
 	writerWg.Add(1)
 	go func() {
@@ -182,7 +224,7 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		}
 	}()
 
-	// 7. Start file fingerprint workers
+	// 8. Start file fingerprint workers
 	var workerWg sync.WaitGroup
 	for w := 0; w < opts.Workers; w++ {
 		workerWg.Add(1)
@@ -199,10 +241,14 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 					IncludeFull: opts.IncludeFull,
 				})
 				if fpErr != nil {
+					if errors.Is(fpErr, fingerprint.ErrFileUnstable) {
+						atomic.AddInt64(&summary.UnstableFilesCount, 1)
+					}
 					recordError(fmt.Errorf("file fingerprint failed for %s: %w", node.FullPath, fpErr))
 					continue
 				}
 
+				atomic.AddInt64(&summary.BytesHashed, node.SizeBytes)
 				node.QuickFingerprint = res.QuickFingerprint
 				node.FullFingerprint = res.FullFingerprint
 				fileDoneChan <- node
@@ -210,9 +256,31 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		}()
 	}
 
-	// 8. Producer: feed file nodes to workers
+	// 9. Producer: evaluate fast-path or queue to workers
 	go func() {
 		for _, fn := range fileNodes {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
+
+			// Fast-path change detection check
+			if useFastPath && cachedMeta != nil {
+				if cached, ok := cachedMeta[fn.RelativePath]; ok {
+					if cached.SizeBytes == fn.SizeBytes && cached.MTimeNs == fn.MTimeNs && len(cached.QuickFingerprint) == 32 {
+						if !opts.IncludeFull || len(cached.FullFingerprint) == 32 {
+							fn.QuickFingerprint = cached.QuickFingerprint
+							fn.FullFingerprint = cached.FullFingerprint
+							atomic.AddInt64(&summary.FastHitsCount, 1)
+							fileDoneChan <- fn
+							continue
+						}
+					}
+				}
+			}
+
+			// Fast-path miss: dispatch to worker pool
 			select {
 			case <-ctx.Done():
 				break
@@ -266,10 +334,7 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 
 		atomic.AddInt64(&totalEntriesScanned, 1)
 		atomic.AddInt64(&summary.DirsCount, 1)
-
-		if opts.ProgressFn != nil {
-			opts.ProgressFn(atomic.LoadInt64(&totalEntriesScanned), atomic.LoadInt64(&totalBytesScanned))
-		}
+		reportProgress()
 
 		// Propagate upward if parent is now ready
 		if dirNode.Parent != nil {
@@ -358,10 +423,7 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		atomic.AddInt64(&totalBytesScanned, fileNode.SizeBytes)
 		atomic.AddInt64(&summary.FilesCount, 1)
 		atomic.AddInt64(&summary.TotalBytes, fileNode.SizeBytes)
-
-		if opts.ProgressFn != nil {
-			opts.ProgressFn(atomic.LoadInt64(&totalEntriesScanned), atomic.LoadInt64(&totalBytesScanned))
-		}
+		reportProgress()
 
 		// Decrement parent pending count
 		if fileNode.Parent != nil {

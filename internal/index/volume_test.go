@@ -9,7 +9,7 @@ import (
 	"github.com/kgorelov/findex/internal/model"
 )
 
-func newTestDB(t *testing.T) *DB {
+func newTestDB(t testing.TB) *DB {
 	t.Helper()
 	db, err := Open(":memory:")
 	if err != nil {
