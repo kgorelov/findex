@@ -1,0 +1,6 @@
+bin/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.findex/
+.findex-volume-id
