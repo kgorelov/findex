@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
 	"github.com/kgorelov/findex/internal/model"
 	"github.com/kgorelov/findex/internal/output"
@@ -173,6 +174,33 @@ across multiple storage volumes in SQLite.`,
 
 	volumeCmd.AddCommand(listCmd, showCmd, registerCmd)
 	rootCmd.AddCommand(volumeCmd)
+
+	// fingerprint / hash debug command
+	var fpFull bool
+	var fpChunkSize int64
+	fpCmd := &cobra.Command{
+		Use:     "fingerprint <file-path>",
+		Aliases: []string{"hash"},
+		Short:   "Compute quick sparse fingerprint (and optional full hash) of a file",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			filePath := args[0]
+			res, err := fingerprint.FingerprintFile(filePath, fingerprint.Options{
+				IncludeFull: fpFull,
+				ChunkSize:   fpChunkSize,
+			})
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				return output.PrintFingerprintJSON(os.Stdout, res)
+			}
+			return output.PrintFingerprint(os.Stdout, res)
+		},
+	}
+	fpCmd.Flags().BoolVar(&fpFull, "full", false, "Compute full BLAKE3-256 fingerprint in addition to quick sparse fingerprint")
+	fpCmd.Flags().Int64Var(&fpChunkSize, "chunk-size", fingerprint.DefaultChunkSize, "Chunk size in bytes for sparse sampling")
+	rootCmd.AddCommand(fpCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

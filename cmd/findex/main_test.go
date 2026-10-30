@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
 	"github.com/kgorelov/findex/internal/model"
 	"github.com/kgorelov/findex/internal/volume"
@@ -94,6 +95,26 @@ func TestCLI_VolumeWorkflow(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected error on duplicate FSUUID, got nil")
 		}
+	}
+}
+
+func TestCLI_FingerprintExecution(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "sample.txt")
+	if err := os.WriteFile(filePath, []byte("Findex fingerprint integration test"), 0644); err != nil {
+		t.Fatalf("failed creating sample file: %v", err)
+	}
+
+	res, err := fingerprint.FingerprintFile(filePath, fingerprint.Options{IncludeFull: true})
+	if err != nil {
+		t.Fatalf("FingerprintFile failed: %v", err)
+	}
+
+	if len(res.QuickFingerprint) != 32 {
+		t.Errorf("expected 32 bytes quick fingerprint, got %d", len(res.QuickFingerprint))
+	}
+	if len(res.FullFingerprint) != 32 {
+		t.Errorf("expected 32 bytes full fingerprint, got %d", len(res.FullFingerprint))
 	}
 }
 
