@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
 	"github.com/kgorelov/findex/internal/model"
 	"github.com/kgorelov/findex/internal/output"
+	"github.com/kgorelov/findex/internal/scan"
 	"github.com/kgorelov/findex/internal/volume"
 	"github.com/spf13/cobra"
 )
@@ -201,6 +203,87 @@ across multiple storage volumes in SQLite.`,
 	fpCmd.Flags().BoolVar(&fpFull, "full", false, "Compute full BLAKE3-256 fingerprint in addition to quick sparse fingerprint")
 	fpCmd.Flags().Int64Var(&fpChunkSize, "chunk-size", fingerprint.DefaultChunkSize, "Chunk size in bytes for sparse sampling")
 	rootCmd.AddCommand(fpCmd)
+
+	// scan command
+	var scanVolID string
+	var scanWorkers int
+	var scanBatchSize int
+	var scanFull bool
+	var scanDryRun bool
+
+	scanCmd := &cobra.Command{
+		Use:   "scan <mount-point-or-directory>",
+		Short: "Scan and index a directory tree on a volume",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			targetDir := args[0]
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			scanner := scan.New(db)
+			summary, err := scanner.Run(context.Background(), scan.Options{
+				VolumeID:    scanVolID,
+				TargetDir:   targetDir,
+				Workers:     scanWorkers,
+				BatchSize:   scanBatchSize,
+				IncludeFull: scanFull,
+				DryRun:      scanDryRun,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintScanSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintScanSummary(os.Stdout, summary)
+		},
+	}
+	scanCmd.Flags().StringVar(&scanVolID, "volume", "", "Explicit volume ID (auto-discovered if omitted)")
+	scanCmd.Flags().IntVar(&scanWorkers, "workers", runtime.NumCPU(), "Number of parallel fingerprint workers")
+	scanCmd.Flags().IntVar(&scanBatchSize, "batch-size", 500, "SQLite write batch size")
+	scanCmd.Flags().BoolVar(&scanFull, "full", false, "Compute full BLAKE3-256 fingerprints in addition to sparse fingerprints")
+	scanCmd.Flags().BoolVar(&scanDryRun, "dry-run", false, "Traverse and fingerprint without writing to database")
+	rootCmd.AddCommand(scanCmd)
+
+	// files command
+	var filesVolID string
+	filesCmd := &cobra.Command{
+		Use:   "files [path-prefix]",
+		Short: "List indexed files and directories for a volume",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if filesVolID == "" {
+				return fmt.Errorf("--volume <volume-id> is required")
+			}
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			var prefix string
+			if len(args) > 0 {
+				prefix = args[0]
+			}
+
+			entries, err := db.ListEntries(context.Background(), filesVolID, prefix)
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintJSON(os.Stdout, entries)
+			}
+			return output.PrintEntriesTable(os.Stdout, entries)
+		},
+	}
+	filesCmd.Flags().StringVar(&filesVolID, "volume", "", "Volume ID to list entries from (required)")
+	rootCmd.AddCommand(filesCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

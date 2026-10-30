@@ -30,6 +30,21 @@ func (t EntryType) String() string {
 	}
 }
 
+// IsRegular returns true if EntryType is a regular file.
+func (t EntryType) IsRegular() bool {
+	return t == EntryTypeRegular
+}
+
+// IsDirectory returns true if EntryType is a directory.
+func (t EntryType) IsDirectory() bool {
+	return t == EntryTypeDirectory
+}
+
+// IsSymlink returns true if EntryType is a symlink.
+func (t EntryType) IsSymlink() bool {
+	return t == EntryTypeSymlink
+}
+
 // EntryTypeFromMode converts a Go fs.FileMode to an EntryType.
 func EntryTypeFromMode(mode fs.FileMode) EntryType {
 	switch {

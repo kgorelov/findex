@@ -10,6 +10,7 @@ import (
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
 	"github.com/kgorelov/findex/internal/model"
+	"github.com/kgorelov/findex/internal/scan"
 	"github.com/kgorelov/findex/internal/volume"
 )
 
@@ -115,6 +116,55 @@ func TestCLI_FingerprintExecution(t *testing.T) {
 	}
 	if len(res.FullFingerprint) != 32 {
 		t.Errorf("expected 32 bytes full fingerprint, got %d", len(res.FullFingerprint))
+	}
+}
+
+func TestCLI_ScanWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	defer db.Close()
+
+	// Create test tree:
+	// data/
+	//   file1.txt
+	//   docs/
+	//     file2.txt
+	dataDir := filepath.Join(tempDir, "data")
+	docsDir := filepath.Join(dataDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("failed creating test dirs: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(dataDir, "file1.txt"), []byte("content 1"), 0644)
+	_ = os.WriteFile(filepath.Join(docsDir, "file2.txt"), []byte("content 2"), 0644)
+
+	scanner := scan.New(db)
+	summary, err := scanner.Run(context.Background(), scan.Options{
+		TargetDir: dataDir,
+		Workers:   2,
+	})
+	if err != nil {
+		t.Fatalf("scanner.Run failed: %v", err)
+	}
+
+	if summary.FilesCount != 2 {
+		t.Errorf("expected 2 files, got %d", summary.FilesCount)
+	}
+	if summary.DirsCount != 2 {
+		t.Errorf("expected 2 dirs, got %d", summary.DirsCount)
+	}
+
+	// Verify entries listed
+	entries, err := db.ListEntries(context.Background(), summary.VolumeID, "")
+	if err != nil {
+		t.Fatalf("ListEntries failed: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Errorf("expected 4 entries in db, got %d", len(entries))
 	}
 }
 
