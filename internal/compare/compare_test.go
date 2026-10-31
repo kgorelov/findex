@@ -125,7 +125,7 @@ func TestCompare_PresentInA_AbsentFromB(t *testing.T) {
 		},
 	})
 
-	// Volume B has shared file only
+	// Volume B has shared file and a B-only file
 	_ = db.UpsertEntries(ctx, []*model.Entry{
 		{
 			VolumeID:         "volB",
@@ -134,11 +134,19 @@ func TestCompare_PresentInA_AbsentFromB(t *testing.T) {
 			SizeBytes:        100,
 			QuickFingerprint: []byte("fp-shared"),
 		},
+		{
+			VolumeID:         "volB",
+			RelativePath:     "/remote/b_only.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        250,
+			QuickFingerprint: []byte("fp-b-only"),
+		},
 	})
 
 	summary, err := Compare(ctx, db, Options{
-		Present: []string{"volA"},
-		Absent:  []string{"volB"},
+		LeftVolumes:  []string{"volA"},
+		RightVolumes: []string{"volB"},
+		Mode:         "left",
 	})
 	if err != nil {
 		t.Fatalf("Compare failed: %v", err)
@@ -158,6 +166,22 @@ func TestCompare_PresentInA_AbsentFromB(t *testing.T) {
 	}
 	if len(summary.Items) != 2 {
 		t.Fatalf("expected 2 absent items, got %d", len(summary.Items))
+	}
+
+	// Compare with --right: files on volB absent from volA
+	rightSummary, err := Compare(ctx, db, Options{
+		LeftVolumes:  []string{"volA"},
+		RightVolumes: []string{"volB"},
+		Mode:         "right",
+	})
+	if err != nil {
+		t.Fatalf("Compare right failed: %v", err)
+	}
+	if rightSummary.TotalSourceEntries != 2 {
+		t.Errorf("expected 2 source entries on right (volB), got %d", rightSummary.TotalSourceEntries)
+	}
+	if rightSummary.AbsentEntries != 1 {
+		t.Errorf("expected 1 entry on volB absent from volA, got %d", rightSummary.AbsentEntries)
 	}
 }
 
@@ -201,8 +225,9 @@ func TestCompare_SetSemantics_Duplicates(t *testing.T) {
 
 	// Under set semantics: content is considered present because at least 1 copy exists in B
 	summary, err := Compare(ctx, db, Options{
-		Present: []string{"vol1"},
-		Absent:  []string{"vol2"},
+		LeftVolumes:  []string{"vol1"},
+		RightVolumes: []string{"vol2"},
+		Mode:         "left",
 	})
 	if err != nil {
 		t.Fatalf("Compare failed: %v", err)
@@ -252,9 +277,10 @@ func TestCompare_DirectoryFingerprintComparison(t *testing.T) {
 	})
 
 	summary, err := Compare(ctx, db, Options{
-		Present:   []string{"vSrc"},
-		Absent:    []string{"vDst"},
-		EntryType: model.EntryTypeDirectory,
+		LeftVolumes:  []string{"vSrc"},
+		RightVolumes: []string{"vDst"},
+		Mode:         "left",
+		EntryType:    model.EntryTypeDirectory,
 	})
 	if err != nil {
 		t.Fatalf("Compare directories failed: %v", err)
@@ -308,10 +334,10 @@ func TestCompare_CommonMode(t *testing.T) {
 	})
 
 	summary, err := Compare(ctx, db, Options{
-		Present:     []string{"v1"},
-		Absent:      []string{"v2"},
-		Mode:        "common",
-		ShowMatches: true,
+		LeftVolumes:  []string{"v1"},
+		RightVolumes: []string{"v2"},
+		Mode:         "common",
+		ShowMatches:  true,
 	})
 	if err != nil {
 		t.Fatalf("Common compare failed: %v", err)
@@ -451,18 +477,41 @@ func TestCompare_ValidationErrors(t *testing.T) {
 
 	_ = db.RegisterVolume(ctx, &model.Volume{VolumeID: "volOverlap", FirstSeenAt: time.Now().UTC()}, false)
 
-	// Present is empty
+	// Invalid mode
 	_, err := Compare(ctx, db, Options{
-		Present: nil,
+		LeftVolumes:  []string{"volOverlap"},
+		RightVolumes: []string{"other"},
+		Mode:         "invalid-mode",
 	})
 	if err == nil {
-		t.Fatalf("expected error when present is empty, got nil")
+		t.Fatalf("expected error on invalid mode, got nil")
+	}
+
+	// Left is empty
+	_, err = Compare(ctx, db, Options{
+		LeftVolumes:  nil,
+		RightVolumes: []string{"other"},
+		Mode:         "left",
+	})
+	if err == nil {
+		t.Fatalf("expected error when left is empty, got nil")
+	}
+
+	// Right is empty
+	_, err = Compare(ctx, db, Options{
+		LeftVolumes:  []string{"volOverlap"},
+		RightVolumes: nil,
+		Mode:         "left",
+	})
+	if err == nil {
+		t.Fatalf("expected error when right is empty, got nil")
 	}
 
 	// Overlapping volume
 	_, err = Compare(ctx, db, Options{
-		Present: []string{"volOverlap"},
-		Absent:  []string{"volOverlap"},
+		LeftVolumes:  []string{"volOverlap"},
+		RightVolumes: []string{"volOverlap"},
+		Mode:         "left",
 	})
 	if err == nil {
 		t.Fatalf("expected error on overlapping volume, got nil")

@@ -36,6 +36,8 @@ type CompareItem struct {
 
 // CompareSummary provides statistics and results for volume set comparisons.
 type CompareSummary struct {
+	LeftVolumes        []string      `json:"left_volumes,omitempty"`
+	RightVolumes       []string      `json:"right_volumes,omitempty"`
 	PresentVolumes     []string      `json:"present_volumes"`
 	AbsentVolumes      []string      `json:"absent_volumes,omitempty"`
 	Mode               string        `json:"mode"`

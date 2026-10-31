@@ -12,9 +12,11 @@ import (
 
 // CompareQueryParams defines parameters for volume set comparisons.
 type CompareQueryParams struct {
+	LeftVolumes    []string
+	RightVolumes   []string
 	PresentVolumes []string
 	AbsentVolumes  []string
-	Mode           string // "absent", "common", "unique"
+	Mode           string // "left", "right", "common", "unique"
 	EntryType      model.EntryType
 	ShowMatches    bool
 	VerifyFullHash bool
@@ -26,7 +28,18 @@ func (d *DB) QueryComparison(ctx context.Context, params CompareQueryParams) (*m
 		return nil, fmt.Errorf("present volumes list cannot be empty")
 	}
 
+	leftVols := params.LeftVolumes
+	if len(leftVols) == 0 {
+		leftVols = params.PresentVolumes
+	}
+	rightVols := params.RightVolumes
+	if len(rightVols) == 0 {
+		rightVols = params.AbsentVolumes
+	}
+
 	summary := &model.CompareSummary{
+		LeftVolumes:    leftVols,
+		RightVolumes:   rightVols,
 		PresentVolumes: params.PresentVolumes,
 		AbsentVolumes:  params.AbsentVolumes,
 		Mode:           params.Mode,
@@ -107,7 +120,7 @@ func (d *DB) QueryComparison(ctx context.Context, params CompareQueryParams) (*m
 	if params.Mode == "common" {
 		items, err = d.queryCommonItems(ctx, params, presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
 	} else {
-		// "absent" or "unique"
+		// "left", "right", or "unique"
 		items, err = d.queryAbsentItems(ctx, params, presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
 	}
 	if err != nil {

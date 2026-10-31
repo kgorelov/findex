@@ -370,30 +370,45 @@ across multiple storage volumes in SQLite.`,
 	var compType string
 	var compShowMatches bool
 	var compVerify bool
-	var compPresent []string
-	var compPreset []string
-	var compAbsent []string
 
 	compareCmd := &cobra.Command{
 		Use:   "compare [--left | --right | --common] <left_volumes> <right_volumes>",
 		Short: "Compare content between two volume sets",
 		Long: `Compare content between two volume sets.
-  --left   - display files/directories which exist only in the left volumes set (default)
+Specifying one of the comparison options is mandatory (no defaults):
+  --left   - display files/directories which exist only in the left volumes set
   --right  - display files/directories which exist only in the right volumes set
   --common - display files/directories which exist in both left and right volumes sets`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var leftSet, rightSet []string
-			if len(args) == 2 {
-				leftSet = []string{args[0]}
-				rightSet = []string{args[1]}
-			} else if len(args) == 0 && (len(compPresent) > 0 || len(compPreset) > 0) {
-				leftSet = compPresent
-				if len(leftSet) == 0 {
-					leftSet = compPreset
-				}
-				rightSet = compAbsent
+			if len(args) != 2 {
+				return fmt.Errorf("compare requires 2 arguments: <left_volumes> <right_volumes> (e.g. 'findex compare --left vol1 vol2')")
+			}
+
+			modeCount := 0
+			if compLeft {
+				modeCount++
+			}
+			if compRight {
+				modeCount++
+			}
+			if compCommon {
+				modeCount++
+			}
+
+			if modeCount == 0 {
+				return fmt.Errorf("a comparison option is mandatory: specify exactly one of --left, --right, or --common")
+			}
+			if modeCount > 1 {
+				return fmt.Errorf("cannot combine comparison options: specify exactly one of --left, --right, or --common")
+			}
+
+			var mode string
+			if compLeft {
+				mode = "left"
+			} else if compRight {
+				mode = "right"
 			} else {
-				return fmt.Errorf("compare requires 2 arguments: left_volumes and right_volumes (e.g. 'findex compare vol1 vol2')")
+				mode = "common"
 			}
 
 			entryType, err := parseEntryType(compType)
@@ -407,24 +422,9 @@ across multiple storage volumes in SQLite.`,
 			}
 			defer db.Close()
 
-			var sourceSet, targetSet []string
-			mode := "absent"
-
-			if compRight {
-				sourceSet = rightSet
-				targetSet = leftSet
-			} else if compCommon {
-				sourceSet = leftSet
-				targetSet = rightSet
-				mode = "common"
-			} else {
-				sourceSet = leftSet
-				targetSet = rightSet
-			}
-
 			summary, err := compare.Compare(context.Background(), db, compare.Options{
-				Present:        sourceSet,
-				Absent:         targetSet,
+				LeftVolumes:    []string{args[0]},
+				RightVolumes:   []string{args[1]},
 				Mode:           mode,
 				EntryType:      entryType,
 				ShowMatches:    compShowMatches,
@@ -440,7 +440,7 @@ across multiple storage volumes in SQLite.`,
 			return output.PrintCompareSummary(os.Stdout, summary)
 		},
 	}
-	compareCmd.Flags().BoolVar(&compLeft, "left", false, "Display files/directories which exist only in the left volumes set (default)")
+	compareCmd.Flags().BoolVar(&compLeft, "left", false, "Display files/directories which exist only in the left volumes set")
 	compareCmd.Flags().BoolVar(&compRight, "right", false, "Display files/directories which exist only in the right volumes set")
 	compareCmd.Flags().BoolVar(&compCommon, "common", false, "Display files/directories which exist in both left and right volumes sets")
 	compareCmd.MarkFlagsMutuallyExclusive("left", "right", "common")
@@ -448,12 +448,6 @@ across multiple storage volumes in SQLite.`,
 	compareCmd.Flags().StringVar(&compType, "type", "all", "Filter entries by type (all, file, dir)")
 	compareCmd.Flags().BoolVar(&compShowMatches, "show-matches", false, "Include matching destination locations in report")
 	compareCmd.Flags().BoolVar(&compVerify, "verify", false, "Verify candidate matches using full fingerprints")
-	compareCmd.Flags().StringSliceVar(&compPresent, "present", nil, "Source volume set (legacy flag)")
-	compareCmd.Flags().StringSliceVar(&compPreset, "preset", nil, "Alias for --present (legacy flag)")
-	compareCmd.Flags().StringSliceVar(&compAbsent, "absent", nil, "Target volume set (legacy flag)")
-	_ = compareCmd.Flags().MarkHidden("present")
-	_ = compareCmd.Flags().MarkHidden("preset")
-	_ = compareCmd.Flags().MarkHidden("absent")
 	rootCmd.AddCommand(compareCmd)
 
 	// uniq command (alias: unique)

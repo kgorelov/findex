@@ -11,38 +11,46 @@ import (
 
 // PrintCompareSummary writes a human-readable comparison report to out.
 func PrintCompareSummary(out io.Writer, s *model.CompareSummary) error {
-	presentList := strings.Join(s.PresentVolumes, ", ")
-	absentList := strings.Join(s.AbsentVolumes, ", ")
-	if absentList == "" {
-		absentList = "(none)"
+	leftList := strings.Join(s.LeftVolumes, ", ")
+	if leftList == "" {
+		leftList = strings.Join(s.PresentVolumes, ", ")
+	}
+	rightList := strings.Join(s.RightVolumes, ", ")
+	if rightList == "" {
+		rightList = strings.Join(s.AbsentVolumes, ", ")
+		if rightList == "" {
+			rightList = "(none)"
+		}
 	}
 
-	modeLabel := s.Mode
-	if modeLabel == "absent" {
-		modeLabel = "Present in source, absent from target"
-	} else if modeLabel == "common" {
-		modeLabel = "Common content (present in both sets)"
-	} else if modeLabel == "unique" {
-		modeLabel = "Unique to volume"
+	var modeLabel, sectionTitle string
+	switch s.Mode {
+	case "left":
+		modeLabel = "--left (exist only in left set)"
+		sectionTitle = fmt.Sprintf("\nLeft Only Entries (%d):", len(s.Items))
+	case "right":
+		modeLabel = "--right (exist only in right set)"
+		sectionTitle = fmt.Sprintf("\nRight Only Entries (%d):", len(s.Items))
+	case "common":
+		modeLabel = "--common (exist in both sets)"
+		sectionTitle = fmt.Sprintf("\nCommon Entries (%d):", len(s.Items))
+	case "unique":
+		modeLabel = "unique (exist only in volume set)"
+		sectionTitle = fmt.Sprintf("\nUnique Entries (%d):", len(s.Items))
+	default:
+		modeLabel = s.Mode
+		sectionTitle = fmt.Sprintf("\nEntries (%d):", len(s.Items))
 	}
 
 	fmt.Fprintf(out, "Volume Comparison (%s)\n", modeLabel)
-	fmt.Fprintf(out, "  Present Volumes:       %s\n", presentList)
-	fmt.Fprintf(out, "  Absent Volumes:        %s\n", absentList)
+	fmt.Fprintf(out, "  Left Volumes:          %s\n", leftList)
+	fmt.Fprintf(out, "  Right Volumes:         %s\n", rightList)
 	fmt.Fprintf(out, "  Type Filter:           %s\n", s.EntryTypeFilter)
 	fmt.Fprintf(out, "  Total Source Content:  %d entries (%s)\n", s.TotalSourceEntries, formatBytes(s.TotalSourceBytes))
 	fmt.Fprintf(out, "  Matching in Target:    %d entries (%s)\n", s.MatchingEntries, formatBytes(s.MatchingBytes))
 	fmt.Fprintf(out, "  Absent from Target:    %d entries (%s)\n", s.AbsentEntries, formatBytes(s.AbsentBytes))
 
 	if len(s.Items) > 0 {
-		var sectionTitle string
-		if s.Mode == "common" {
-			sectionTitle = fmt.Sprintf("\nCommon Entries (%d):", len(s.Items))
-		} else if s.Mode == "unique" {
-			sectionTitle = fmt.Sprintf("\nUnique Entries (%d):", len(s.Items))
-		} else {
-			sectionTitle = fmt.Sprintf("\nAbsent Entries (%d):", len(s.Items))
-		}
 		fmt.Fprintln(out, sectionTitle)
 
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

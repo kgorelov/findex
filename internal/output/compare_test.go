@@ -50,11 +50,11 @@ func TestPrintCompareSummary(t *testing.T) {
 	if !strings.Contains(out, "Volume Comparison") {
 		t.Errorf("expected header 'Volume Comparison', got: %s", out)
 	}
-	if !strings.Contains(out, "Present Volumes:       volA") {
-		t.Errorf("expected present volumes, got: %s", out)
+	if !strings.Contains(out, "Left Volumes:          volA") {
+		t.Errorf("expected left volumes, got: %s", out)
 	}
-	if !strings.Contains(out, "Absent Volumes:        volB") {
-		t.Errorf("expected absent volumes, got: %s", out)
+	if !strings.Contains(out, "Right Volumes:         volB") {
+		t.Errorf("expected right volumes, got: %s", out)
 	}
 	if !strings.Contains(out, "/missing/file1.txt") {
 		t.Errorf("expected /missing/file1.txt in items, got: %s", out)

@@ -287,11 +287,11 @@ func TestCLI_CompareWorkflow(t *testing.T) {
 	})
 	db.Close()
 
-	// New syntax: findex compare vol1 vol2 (default --left)
-	cmd := buildRootCmd()
-	cmd.SetArgs([]string{"--db", dbFile, "compare", "vol1", "vol2"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("findex compare vol1 vol2 failed: %v", err)
+	// Omitting comparison mode must fail (mandatory option)
+	cmdNoMode := buildRootCmd()
+	cmdNoMode.SetArgs([]string{"--db", dbFile, "compare", "vol1", "vol2"})
+	if err := cmdNoMode.Execute(); err == nil {
+		t.Fatalf("expected error when comparison mode option is omitted, got nil")
 	}
 
 	// findex compare --left vol1 vol2
@@ -315,11 +315,11 @@ func TestCLI_CompareWorkflow(t *testing.T) {
 		t.Fatalf("findex compare --common vol1 vol2 failed: %v", err)
 	}
 
-	// Legacy flag syntax backwards compatibility
-	cmdLegacy := buildRootCmd()
-	cmdLegacy.SetArgs([]string{"--db", dbFile, "compare", "--present", "vol1", "--absent", "vol2"})
-	if err := cmdLegacy.Execute(); err != nil {
-		t.Fatalf("findex compare legacy failed: %v", err)
+	// Combining options must fail
+	cmdMulti := buildRootCmd()
+	cmdMulti.SetArgs([]string{"--db", dbFile, "compare", "--left", "--right", "vol1", "vol2"})
+	if err := cmdMulti.Execute(); err == nil {
+		t.Fatalf("expected error when combining --left and --right, got nil")
 	}
 }
 
