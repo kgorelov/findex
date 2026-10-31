@@ -10,6 +10,7 @@ import (
 
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
+	"github.com/kgorelov/findex/internal/merge"
 	"github.com/kgorelov/findex/internal/model"
 	"github.com/kgorelov/findex/internal/output"
 	"github.com/kgorelov/findex/internal/scan"
@@ -37,7 +38,7 @@ func getDB() (*index.DB, error) {
 	return index.Open(dbPath)
 }
 
-func main() {
+func buildRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "findex",
 		Short: "Multi-Volume File Inventory and recovery-planning tool",
@@ -313,7 +314,56 @@ across multiple storage volumes in SQLite.`,
 	filesCmd.Flags().StringVar(&filesVolID, "volume", "", "Volume ID to list entries from (required)")
 	rootCmd.AddCommand(filesCmd)
 
-	if err := rootCmd.Execute(); err != nil {
+	// merge command
+	var mergePolicy string
+	var mergeForce bool
+	var mergeDryRun bool
+
+	mergeCmd := &cobra.Command{
+		Use:   "merge <other-index.sqlite>",
+		Short: "Merge volume metadata and entries from another SQLite index database",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sourcePath := args[0]
+
+			policy := model.ConflictPolicy(mergePolicy)
+			switch policy {
+			case model.PolicyPreferNewer, model.PolicyKeepLocal, model.PolicyKeepRemote, model.PolicyFailOnConflict:
+			default:
+				return fmt.Errorf("invalid conflict policy %q: must be one of 'newer', 'keep-local', 'keep-remote', 'fail'", mergePolicy)
+			}
+
+			destDB, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer destDB.Close()
+
+			res, err := merge.Merge(context.Background(), destDB, sourcePath, merge.Options{
+				Policy: policy,
+				Force:  mergeForce,
+				DryRun: mergeDryRun,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintMergeSummaryJSON(os.Stdout, res)
+			}
+			return output.PrintMergeSummary(os.Stdout, res)
+		},
+	}
+	mergeCmd.Flags().StringVar(&mergePolicy, "policy", "newer", "Conflict resolution policy (newer, keep-local, keep-remote, fail)")
+	mergeCmd.Flags().BoolVar(&mergeForce, "force", false, "Force merge even if volume metadata conflicts")
+	mergeCmd.Flags().BoolVar(&mergeDryRun, "dry-run", false, "Simulate merge without committing database changes")
+	rootCmd.AddCommand(mergeCmd)
+
+	return rootCmd
+}
+
+func main() {
+	if err := buildRootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
 }

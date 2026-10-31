@@ -105,6 +105,51 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 2,
+		name:    "merge_tracking",
+		up: func(ctx context.Context, tx *sql.Tx) error {
+			statements := []string{
+				`CREATE TABLE IF NOT EXISTS merge_runs (
+					merge_id            TEXT PRIMARY KEY,
+					source_path         TEXT NOT NULL,
+					status              TEXT NOT NULL,
+					started_at          INTEGER NOT NULL,
+					completed_at        INTEGER,
+					volumes_merged      INTEGER DEFAULT 0,
+					entries_inserted    INTEGER DEFAULT 0,
+					entries_updated     INTEGER DEFAULT 0,
+					entries_identical   INTEGER DEFAULT 0,
+					same_content_diff_loc INTEGER DEFAULT 0,
+					conflicts_count     INTEGER DEFAULT 0,
+					error_message       TEXT
+				);`,
+
+				`CREATE TABLE IF NOT EXISTS merge_conflicts (
+					id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+					merge_id            TEXT NOT NULL,
+					conflict_kind       TEXT NOT NULL,
+					volume_id           TEXT NOT NULL,
+					relative_path       TEXT,
+					local_detail        TEXT,
+					remote_detail       TEXT,
+					resolution          TEXT,
+					created_at          INTEGER NOT NULL,
+					FOREIGN KEY (merge_id) REFERENCES merge_runs(merge_id) ON DELETE CASCADE
+				);`,
+
+				`CREATE INDEX IF NOT EXISTS idx_merge_conflicts_merge_id
+					ON merge_conflicts(merge_id);`,
+			}
+
+			for _, stmt := range statements {
+				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					return fmt.Errorf("failed executing statement: %w\nSQL: %s", err, stmt)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // Migrate executes pending database migrations in a transaction.

@@ -183,3 +183,67 @@ func TestCLI_DefaultDBPath(t *testing.T) {
 		t.Errorf("unexpected default db path: %q", path)
 	}
 }
+
+func TestCLI_MergeWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	destDBFile := filepath.Join(tempDir, "dest.sqlite")
+	srcDBFile := filepath.Join(tempDir, "src.sqlite")
+
+	destDB, err := index.Open(destDBFile)
+	if err != nil {
+		t.Fatalf("failed opening dest db: %v", err)
+	}
+	_ = destDB.RegisterVolume(context.Background(), &model.Volume{
+		VolumeID: "local-vol",
+		Label:    "LocalDisk",
+	}, false)
+	destDB.Close()
+
+	srcDB, err := index.Open(srcDBFile)
+	if err != nil {
+		t.Fatalf("failed opening src db: %v", err)
+	}
+	_ = srcDB.RegisterVolume(context.Background(), &model.Volume{
+		VolumeID: "remote-vol",
+		Label:    "RemoteBackup",
+	}, false)
+	_ = srcDB.UpsertEntries(context.Background(), []*model.Entry{
+		{
+			VolumeID:         "remote-vol",
+			RelativePath:     "/remote/file.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        42,
+			QuickFingerprint: []byte("fp-remote-42"),
+		},
+	})
+	srcDB.Close()
+
+	cmd := buildRootCmd()
+	cmd.SetArgs([]string{"--db", destDBFile, "merge", srcDBFile})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("findex merge CLI command failed: %v", err)
+	}
+
+	// Verify merged in destDB
+	destDB, err = index.Open(destDBFile)
+	if err != nil {
+		t.Fatalf("failed re-opening dest db: %v", err)
+	}
+	defer destDB.Close()
+
+	vols, err := destDB.ListVolumes(context.Background(), model.VolumeFilter{})
+	if err != nil {
+		t.Fatalf("failed listing volumes: %v", err)
+	}
+	if len(vols) != 2 {
+		t.Fatalf("expected 2 volumes after CLI merge, got %d", len(vols))
+	}
+
+	entries, err := destDB.ListEntries(context.Background(), "remote-vol", "")
+	if err != nil {
+		t.Fatalf("failed listing entries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].RelativePath != "/remote/file.txt" {
+		t.Errorf("expected /remote/file.txt in merged entries, got %v", entries)
+	}
+}

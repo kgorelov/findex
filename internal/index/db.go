@@ -71,6 +71,38 @@ func Open(path string) (*DB, error) {
 	return idxDB, nil
 }
 
+// OpenReadOnly opens an existing SQLite index database in read-only mode without running migrations.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("database path cannot be empty")
+	}
+
+	dsn := path
+	if path != ":memory:" {
+		dsn = "file:" + filepath.ToSlash(path) + "?mode=ro"
+	}
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open sqlite database at %q: %w", path, err)
+	}
+
+	pragmas := []string{
+		"PRAGMA busy_timeout = 5000;",
+		"PRAGMA query_only = ON;",
+	}
+	for _, p := range pragmas {
+		_, _ = db.Exec(p)
+	}
+
+	db.SetMaxOpenConns(1)
+
+	return &DB{
+		db:   db,
+		path: path,
+	}, nil
+}
+
 // Close closes the underlying database handle.
 func (d *DB) Close() error {
 	return d.db.Close()
