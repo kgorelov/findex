@@ -113,21 +113,6 @@ func (d *DB) RegisterVolume(ctx context.Context, vol *model.Volume, force bool) 
 						vol.VolumeID, existing.FSType, vol.FSType),
 				}
 			}
-
-			// If observed on same host, device ID must match if both present
-			if existing.SourceHost != "" && vol.SourceHost != "" &&
-				strings.EqualFold(existing.SourceHost, vol.SourceHost) &&
-				existing.DeviceID != "" && vol.DeviceID != "" &&
-				existing.DeviceID != vol.DeviceID {
-				return &model.VolumeConflictError{
-					Type:          model.ConflictTypeDeviceMismatch,
-					VolumeID:      vol.VolumeID,
-					ExistingValue: existing.DeviceID,
-					IncomingValue: vol.DeviceID,
-					Message: fmt.Sprintf("volume %q observed on same host %q with conflicting device ID: existing=%q, incoming=%q",
-						vol.VolumeID, vol.SourceHost, existing.DeviceID, vol.DeviceID),
-				}
-			}
 		}
 
 		// Update fields

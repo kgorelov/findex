@@ -194,16 +194,6 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 					LocalDetail:  "fs_type=" + localVol.FSType,
 					RemoteDetail: "fs_type=" + remoteVol.FSType,
 				}
-			} else if localVol.SourceHost != "" && remoteVol.SourceHost != "" &&
-				strings.EqualFold(localVol.SourceHost, remoteVol.SourceHost) &&
-				localVol.DeviceID != "" && remoteVol.DeviceID != "" &&
-				localVol.DeviceID != remoteVol.DeviceID {
-				volConflict = &model.MergeConflict{
-					ConflictKind: model.ConflictKindVolumeMetadata,
-					VolumeID:     remoteVol.VolumeID,
-					LocalDetail:  "device_id=" + localVol.DeviceID,
-					RemoteDetail: "device_id=" + remoteVol.DeviceID,
-				}
 			}
 
 			if volConflict != nil {

@@ -200,21 +200,27 @@ func TestDB_RegisterVolume_Conflicts(t *testing.T) {
 		t.Fatalf("expected ConflictTypeFSTypeMismatch, got %v", err)
 	}
 
-	// 3. Conflicting Device on same host
-	conflictDevice := &model.Volume{
+	// 3. Changed Device on same host (e.g. removable drive plugged in as /dev/sdb1) should succeed and update DeviceID
+	changedDevice := &model.Volume{
 		VolumeID:   "vol-conflict",
 		FSUUID:     "uuid-base",
 		FSType:     "btrfs",
 		DeviceID:   "/dev/sdb1",
 		SourceHost: "desktop",
 	}
-	err = db.RegisterVolume(ctx, conflictDevice, false)
-	if !errors.As(err, &conflictErr) || conflictErr.Type != model.ConflictTypeDeviceMismatch {
-		t.Fatalf("expected ConflictTypeDeviceMismatch, got %v", err)
+	if err := db.RegisterVolume(ctx, changedDevice, false); err != nil {
+		t.Fatalf("expected device change to succeed on removable media, got %v", err)
+	}
+	updated, err := db.GetVolume(ctx, "vol-conflict")
+	if err != nil {
+		t.Fatalf("failed getting updated volume: %v", err)
+	}
+	if updated.DeviceID != "/dev/sdb1" {
+		t.Errorf("expected updated DeviceID /dev/sdb1, got %q", updated.DeviceID)
 	}
 
 	// 4. Force should override conflict
-	if err := db.RegisterVolume(ctx, conflictDevice, true); err != nil {
+	if err := db.RegisterVolume(ctx, conflictFSType, true); err != nil {
 		t.Fatalf("expected force to succeed, got %v", err)
 	}
 }
