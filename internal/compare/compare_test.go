@@ -396,6 +396,54 @@ func TestUnique_SingleVolume(t *testing.T) {
 	}
 }
 
+func TestUnique_MultiVolumeSet(t *testing.T) {
+	ctx := context.Background()
+	db := createTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	_ = db.RegisterVolume(ctx, &model.Volume{VolumeID: "set1", FirstSeenAt: now}, false)
+	_ = db.RegisterVolume(ctx, &model.Volume{VolumeID: "set2", FirstSeenAt: now}, false)
+	_ = db.RegisterVolume(ctx, &model.Volume{VolumeID: "other", FirstSeenAt: now}, false)
+
+	_ = db.UpsertEntries(ctx, []*model.Entry{
+		{
+			VolumeID:         "set1",
+			RelativePath:     "/f1.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        10,
+			QuickFingerprint: []byte("fp-set-1"),
+		},
+		{
+			VolumeID:         "set2",
+			RelativePath:     "/f2.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        20,
+			QuickFingerprint: []byte("fp-set-2"),
+		},
+		{
+			VolumeID:         "other",
+			RelativePath:     "/shared.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        20,
+			QuickFingerprint: []byte("fp-set-2"),
+		},
+	})
+
+	// Content unique to set1,set2 (f1 is unique, f2 exists in other)
+	summary, err := Unique(ctx, db, "set1,set2", nil, Options{})
+	if err != nil {
+		t.Fatalf("multi-volume unique failed: %v", err)
+	}
+
+	if summary.AbsentEntries != 1 {
+		t.Fatalf("expected 1 unique entry for set1,set2, got %d", summary.AbsentEntries)
+	}
+	if len(summary.Items) != 1 || summary.Items[0].RelativePath != "/f1.txt" {
+		t.Errorf("expected /f1.txt to be unique to set1,set2, got %v", summary.Items)
+	}
+}
+
 func TestCompare_ValidationErrors(t *testing.T) {
 	ctx := context.Background()
 	db := createTestDB(t)

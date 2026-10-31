@@ -13,6 +13,7 @@ import (
 	"github.com/kgorelov/findex/internal/export"
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
+	"github.com/kgorelov/findex/internal/lookup"
 	"github.com/kgorelov/findex/internal/merge"
 	"github.com/kgorelov/findex/internal/model"
 	"github.com/kgorelov/findex/internal/output"
@@ -363,21 +364,36 @@ across multiple storage volumes in SQLite.`,
 	rootCmd.AddCommand(mergeCmd)
 
 	// compare command
-	var compPresent []string
-	var compPreset []string
-	var compAbsent []string
+	var compLeft bool
+	var compRight bool
 	var compCommon bool
 	var compType string
 	var compShowMatches bool
 	var compVerify bool
+	var compPresent []string
+	var compPreset []string
+	var compAbsent []string
 
 	compareCmd := &cobra.Command{
-		Use:   "compare",
-		Short: "Compare content between volume sets",
+		Use:   "compare [--left | --right | --common] <left_volumes> <right_volumes>",
+		Short: "Compare content between two volume sets",
+		Long: `Compare content between two volume sets.
+  --left   - display files/directories which exist only in the left volumes set (default)
+  --right  - display files/directories which exist only in the right volumes set
+  --common - display files/directories which exist in both left and right volumes sets`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			present := compPresent
-			if len(present) == 0 && len(compPreset) > 0 {
-				present = compPreset
+			var leftSet, rightSet []string
+			if len(args) == 2 {
+				leftSet = []string{args[0]}
+				rightSet = []string{args[1]}
+			} else if len(args) == 0 && (len(compPresent) > 0 || len(compPreset) > 0) {
+				leftSet = compPresent
+				if len(leftSet) == 0 {
+					leftSet = compPreset
+				}
+				rightSet = compAbsent
+			} else {
+				return fmt.Errorf("compare requires 2 arguments: left_volumes and right_volumes (e.g. 'findex compare vol1 vol2')")
 			}
 
 			entryType, err := parseEntryType(compType)
@@ -391,14 +407,24 @@ across multiple storage volumes in SQLite.`,
 			}
 			defer db.Close()
 
+			var sourceSet, targetSet []string
 			mode := "absent"
-			if compCommon {
+
+			if compRight {
+				sourceSet = rightSet
+				targetSet = leftSet
+			} else if compCommon {
+				sourceSet = leftSet
+				targetSet = rightSet
 				mode = "common"
+			} else {
+				sourceSet = leftSet
+				targetSet = rightSet
 			}
 
 			summary, err := compare.Compare(context.Background(), db, compare.Options{
-				Present:        present,
-				Absent:         compAbsent,
+				Present:        sourceSet,
+				Absent:         targetSet,
 				Mode:           mode,
 				EntryType:      entryType,
 				ShowMatches:    compShowMatches,
@@ -414,28 +440,43 @@ across multiple storage volumes in SQLite.`,
 			return output.PrintCompareSummary(os.Stdout, summary)
 		},
 	}
-	compareCmd.Flags().StringSliceVar(&compPresent, "present", nil, "Source volume set (IDs or filters: host:X, label:X, uuid:X)")
-	compareCmd.Flags().StringSliceVar(&compPreset, "preset", nil, "Alias for --present")
-	compareCmd.Flags().StringSliceVar(&compAbsent, "absent", nil, "Target volume set to compare against")
-	compareCmd.Flags().BoolVar(&compCommon, "common", false, "Report common content present in both sets")
+	compareCmd.Flags().BoolVar(&compLeft, "left", false, "Display files/directories which exist only in the left volumes set (default)")
+	compareCmd.Flags().BoolVar(&compRight, "right", false, "Display files/directories which exist only in the right volumes set")
+	compareCmd.Flags().BoolVar(&compCommon, "common", false, "Display files/directories which exist in both left and right volumes sets")
+	compareCmd.MarkFlagsMutuallyExclusive("left", "right", "common")
+
 	compareCmd.Flags().StringVar(&compType, "type", "all", "Filter entries by type (all, file, dir)")
 	compareCmd.Flags().BoolVar(&compShowMatches, "show-matches", false, "Include matching destination locations in report")
 	compareCmd.Flags().BoolVar(&compVerify, "verify", false, "Verify candidate matches using full fingerprints")
+	compareCmd.Flags().StringSliceVar(&compPresent, "present", nil, "Source volume set (legacy flag)")
+	compareCmd.Flags().StringSliceVar(&compPreset, "preset", nil, "Alias for --present (legacy flag)")
+	compareCmd.Flags().StringSliceVar(&compAbsent, "absent", nil, "Target volume set (legacy flag)")
+	_ = compareCmd.Flags().MarkHidden("present")
+	_ = compareCmd.Flags().MarkHidden("preset")
+	_ = compareCmd.Flags().MarkHidden("absent")
 	rootCmd.AddCommand(compareCmd)
 
-	// unique command
+	// uniq command (alias: unique)
 	var uniqVol string
 	var uniqAmong []string
 	var uniqType string
 	var uniqShowMatches bool
 	var uniqVerify bool
 
-	uniqueCmd := &cobra.Command{
-		Use:   "unique",
-		Short: "Find content unique to a single volume among a set of volumes",
+	uniqCmd := &cobra.Command{
+		Use:     "uniq <volumes_set>",
+		Aliases: []string{"unique"},
+		Short:   "Display files which exist only in this volumes set",
+		Long: `Display files which exist only in this volumes set.
+This command is syntax sugar for: findex compare --left volumes_set all_other_volumes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if uniqVol == "" {
-				return fmt.Errorf("--volume <volume-id> is required")
+			var volSet string
+			if len(args) == 1 {
+				volSet = args[0]
+			} else if len(args) == 0 && uniqVol != "" {
+				volSet = uniqVol
+			} else {
+				return fmt.Errorf("uniq requires 1 argument: volumes_set (e.g. 'findex uniq vol1')")
 			}
 
 			entryType, err := parseEntryType(uniqType)
@@ -449,7 +490,7 @@ across multiple storage volumes in SQLite.`,
 			}
 			defer db.Close()
 
-			summary, err := compare.Unique(context.Background(), db, uniqVol, uniqAmong, compare.Options{
+			summary, err := compare.Unique(context.Background(), db, volSet, uniqAmong, compare.Options{
 				EntryType:      entryType,
 				ShowMatches:    uniqShowMatches,
 				VerifyFullHash: uniqVerify,
@@ -464,12 +505,43 @@ across multiple storage volumes in SQLite.`,
 			return output.PrintCompareSummary(os.Stdout, summary)
 		},
 	}
-	uniqueCmd.Flags().StringVar(&uniqVol, "volume", "", "Volume to inspect for unique content (required)")
-	uniqueCmd.Flags().StringSliceVar(&uniqAmong, "among", nil, "Volumes to compare against (defaults to all other volumes)")
-	uniqueCmd.Flags().StringVar(&uniqType, "type", "all", "Filter entries by type (all, file, dir)")
-	uniqueCmd.Flags().BoolVar(&uniqShowMatches, "show-matches", false, "Include matching destination locations in report")
-	uniqueCmd.Flags().BoolVar(&uniqVerify, "verify", false, "Verify candidate matches using full fingerprints")
-	rootCmd.AddCommand(uniqueCmd)
+	uniqCmd.Flags().StringVar(&uniqVol, "volume", "", "Volume or volume set (legacy flag)")
+	_ = uniqCmd.Flags().MarkHidden("volume")
+	uniqCmd.Flags().StringSliceVar(&uniqAmong, "among", nil, "Volumes to compare against (defaults to all other volumes)")
+	uniqCmd.Flags().StringVar(&uniqType, "type", "all", "Filter entries by type (all, file, dir)")
+	uniqCmd.Flags().BoolVar(&uniqShowMatches, "show-matches", false, "Include matching destination locations in report")
+	uniqCmd.Flags().BoolVar(&uniqVerify, "verify", false, "Verify candidate matches using full fingerprints")
+	rootCmd.AddCommand(uniqCmd)
+
+	// lookup command
+	lookupCmd := &cobra.Command{
+		Use:   "lookup <fingerprint | filepath>",
+		Short: "Lookup a fingerprint or calculate fingerprint for a file/directory and search database",
+		Long: `Lookup searches the index database for matching entries.
+- If a partial or full fingerprint is given, it searches entries matching that fingerprint.
+- If a filepath is given (file or directory), it computes the fingerprint on-the-fly and looks it up in the database.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := args[0]
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			summary, err := lookup.Lookup(context.Background(), db, target)
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintLookupSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintLookupSummary(os.Stdout, summary)
+		},
+	}
+	rootCmd.AddCommand(lookupCmd)
 
 	// check command
 	checkCmd := &cobra.Command{

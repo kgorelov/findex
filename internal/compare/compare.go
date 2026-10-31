@@ -63,7 +63,8 @@ func Compare(ctx context.Context, db *index.DB, opts Options) (*model.CompareSum
 	})
 }
 
-// Unique identifies content present on a selected volume but absent from all other volumes in the set.
+// Unique identifies content present in volumesSelector but absent from all other volumes.
+// This is syntax sugar for Compare with Present=volumesSelector, Absent=all_other_volumes.
 func Unique(ctx context.Context, db *index.DB, volumeSelector string, amongSelectors []string, opts Options) (*model.CompareSummary, error) {
 	if db == nil {
 		return nil, fmt.Errorf("database cannot be nil")
@@ -74,12 +75,16 @@ func Unique(ctx context.Context, db *index.DB, volumeSelector string, amongSelec
 
 	targetIDs, err := ResolveVolumes(ctx, db, []string{volumeSelector})
 	if err != nil {
-		return nil, fmt.Errorf("failed resolving target volume: %w", err)
+		return nil, fmt.Errorf("failed resolving target volumes: %w", err)
 	}
-	if len(targetIDs) != 1 {
-		return nil, fmt.Errorf("unique requires exactly one target volume, found %d", len(targetIDs))
+	if len(targetIDs) == 0 {
+		return nil, fmt.Errorf("unique requires at least one target volume")
 	}
-	targetID := targetIDs[0]
+
+	targetSet := make(map[string]bool, len(targetIDs))
+	for _, id := range targetIDs {
+		targetSet[id] = true
+	}
 
 	var otherIDs []string
 	if len(amongSelectors) > 0 {
@@ -88,7 +93,7 @@ func Unique(ctx context.Context, db *index.DB, volumeSelector string, amongSelec
 			return nil, fmt.Errorf("failed resolving among volumes: %w", err)
 		}
 		for _, id := range resolvedAmong {
-			if id != targetID {
+			if !targetSet[id] {
 				otherIDs = append(otherIDs, id)
 			}
 		}
@@ -99,13 +104,13 @@ func Unique(ctx context.Context, db *index.DB, volumeSelector string, amongSelec
 			return nil, fmt.Errorf("failed listing all volumes: %w", err)
 		}
 		for _, v := range allVols {
-			if v.VolumeID != targetID {
+			if !targetSet[v.VolumeID] {
 				otherIDs = append(otherIDs, v.VolumeID)
 			}
 		}
 	}
 
-	opts.Present = []string{targetID}
+	opts.Present = targetIDs
 	opts.Absent = otherIDs
 	opts.Mode = "unique"
 

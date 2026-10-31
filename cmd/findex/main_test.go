@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,16 +287,39 @@ func TestCLI_CompareWorkflow(t *testing.T) {
 	})
 	db.Close()
 
+	// New syntax: findex compare vol1 vol2 (default --left)
 	cmd := buildRootCmd()
-	cmd.SetArgs([]string{"--db", dbFile, "compare", "--present", "vol1", "--absent", "vol2"})
+	cmd.SetArgs([]string{"--db", dbFile, "compare", "vol1", "vol2"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("findex compare failed: %v", err)
+		t.Fatalf("findex compare vol1 vol2 failed: %v", err)
 	}
 
-	cmdJSON := buildRootCmd()
-	cmdJSON.SetArgs([]string{"--db", dbFile, "--json", "compare", "--present", "vol1", "--absent", "vol2", "--common"})
-	if err := cmdJSON.Execute(); err != nil {
-		t.Fatalf("findex compare --common failed: %v", err)
+	// findex compare --left vol1 vol2
+	cmdLeft := buildRootCmd()
+	cmdLeft.SetArgs([]string{"--db", dbFile, "compare", "--left", "vol1", "vol2"})
+	if err := cmdLeft.Execute(); err != nil {
+		t.Fatalf("findex compare --left vol1 vol2 failed: %v", err)
+	}
+
+	// findex compare --right vol1 vol2
+	cmdRight := buildRootCmd()
+	cmdRight.SetArgs([]string{"--db", dbFile, "compare", "--right", "vol1", "vol2"})
+	if err := cmdRight.Execute(); err != nil {
+		t.Fatalf("findex compare --right vol1 vol2 failed: %v", err)
+	}
+
+	// findex compare --common vol1 vol2
+	cmdCommon := buildRootCmd()
+	cmdCommon.SetArgs([]string{"--db", dbFile, "--json", "compare", "--common", "vol1", "vol2"})
+	if err := cmdCommon.Execute(); err != nil {
+		t.Fatalf("findex compare --common vol1 vol2 failed: %v", err)
+	}
+
+	// Legacy flag syntax backwards compatibility
+	cmdLegacy := buildRootCmd()
+	cmdLegacy.SetArgs([]string{"--db", dbFile, "compare", "--present", "vol1", "--absent", "vol2"})
+	if err := cmdLegacy.Execute(); err != nil {
+		t.Fatalf("findex compare legacy failed: %v", err)
 	}
 }
 
@@ -322,10 +346,95 @@ func TestCLI_UniqueWorkflow(t *testing.T) {
 	})
 	db.Close()
 
+	// Positional syntax: findex uniq vA
 	cmd := buildRootCmd()
-	cmd.SetArgs([]string{"--db", dbFile, "unique", "--volume", "vA", "--among", "vA,vB"})
+	cmd.SetArgs([]string{"--db", dbFile, "uniq", "vA"})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("findex unique failed: %v", err)
+		t.Fatalf("findex uniq vA failed: %v", err)
+	}
+
+	// Positional syntax: findex unique vA
+	cmdAlias := buildRootCmd()
+	cmdAlias.SetArgs([]string{"--db", dbFile, "unique", "vA"})
+	if err := cmdAlias.Execute(); err != nil {
+		t.Fatalf("findex unique alias failed: %v", err)
+	}
+
+	// Legacy flag syntax
+	cmdLegacy := buildRootCmd()
+	cmdLegacy.SetArgs([]string{"--db", dbFile, "unique", "--volume", "vA", "--among", "vA,vB"})
+	if err := cmdLegacy.Execute(); err != nil {
+		t.Fatalf("findex unique legacy failed: %v", err)
+	}
+}
+
+func TestCLI_LookupWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	dataDir := filepath.Join(tempDir, "lookup_data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	filePath := filepath.Join(dataDir, "item.txt")
+	if err := os.WriteFile(filePath, []byte("Lookup content 12345"), 0644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	defer db.Close()
+
+	_ = db.RegisterVolume(context.Background(), &model.Volume{
+		VolumeID:       "volLookup",
+		Label:          "LookupDisk",
+		LastMountPoint: dataDir,
+		FirstSeenAt:    time.Now().UTC(),
+	}, false)
+
+	scanner := scan.New(db)
+	_, err = scanner.Run(context.Background(), scan.Options{
+		VolumeID:  "volLookup",
+		TargetDir: dataDir,
+	})
+	if err != nil {
+		t.Fatalf("scanner.Run failed: %v", err)
+	}
+
+	// 1. Lookup by filepath
+	cmdFile := buildRootCmd()
+	cmdFile.SetArgs([]string{"--db", dbFile, "lookup", filePath})
+	if err := cmdFile.Execute(); err != nil {
+		t.Fatalf("findex lookup filepath failed: %v", err)
+	}
+
+	// 2. Lookup by directory path
+	cmdDir := buildRootCmd()
+	cmdDir.SetArgs([]string{"--db", dbFile, "lookup", dataDir})
+	if err := cmdDir.Execute(); err != nil {
+		t.Fatalf("findex lookup directory failed: %v", err)
+	}
+
+	// 3. Lookup by partial hex fingerprint
+	entries, _ := db.ListEntries(context.Background(), "volLookup", "")
+	var partialFP string
+	for _, e := range entries {
+		if len(e.QuickFingerprint) > 0 {
+			hexFP := fmt.Sprintf("%x", e.QuickFingerprint)
+			partialFP = hexFP[:8]
+			break
+		}
+	}
+	if partialFP == "" {
+		t.Fatalf("expected scanned file entry with quick fingerprint")
+	}
+
+	cmdFP := buildRootCmd()
+	cmdFP.SetArgs([]string{"--db", dbFile, "--json", "lookup", partialFP})
+	if err := cmdFP.Execute(); err != nil {
+		t.Fatalf("findex lookup partial hex failed: %v", err)
 	}
 }
 
