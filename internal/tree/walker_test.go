@@ -68,3 +68,33 @@ func TestBuildTree(t *testing.T) {
 		t.Errorf("expected 0 pending count for empty dir, got %d", foundEmpty.PendingCount)
 	}
 }
+
+func TestBuildTreeWithProgress(t *testing.T) {
+	tempDir := t.TempDir()
+
+	for i := 0; i < 5; i++ {
+		fn := filepath.Join(tempDir, filepath.Base(tempDir)+string(rune('a'+i))+".txt")
+		if err := os.WriteFile(fn, []byte("data"), 0644); err != nil {
+			t.Fatalf("failed writing test file: %v", err)
+		}
+	}
+
+	var reports []WalkProgress
+	_, fileNodes, _, err := BuildTreeWithProgress(context.Background(), "vol-prog", tempDir, tempDir, func(wp WalkProgress) {
+		reports = append(reports, wp)
+	})
+	if err != nil {
+		t.Fatalf("BuildTreeWithProgress failed: %v", err)
+	}
+
+	if len(fileNodes) != 5 {
+		t.Errorf("expected 5 files, got %d", len(fileNodes))
+	}
+	if len(reports) == 0 {
+		t.Errorf("expected progress reports to be emitted")
+	}
+	last := reports[len(reports)-1]
+	if last.FilesDiscovered != 5 {
+		t.Errorf("expected 5 files discovered, got %d", last.FilesDiscovered)
+	}
+}

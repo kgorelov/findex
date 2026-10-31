@@ -16,14 +16,30 @@ import (
 	"github.com/kgorelov/findex/internal/volume"
 )
 
+// ScanPhase indicates the current phase of the scan operation.
+type ScanPhase string
+
+const (
+	PhaseDiscovering ScanPhase = "discovering"
+	PhaseProcessing  ScanPhase = "processing"
+)
+
 // Progress holds real-time counters emitted during scan execution.
 type Progress struct {
-	EntriesScanned int64
-	BytesScanned   int64
-	FilesScanned   int64
-	FastHits       int64
-	DirsScanned    int64
-	Elapsed        time.Duration
+	Phase           ScanPhase
+	EntriesScanned  int64
+	BytesScanned    int64
+	FilesScanned    int64
+	FastHits        int64
+	DirsScanned     int64
+	TotalFiles      int64
+	TotalBytes      int64
+	FilesCompleted  int64
+	BytesCompleted  int64
+	BytesHashed     int64
+	Elapsed         time.Duration
+	EstimatedRemain time.Duration
+	Percent         float64
 }
 
 // Options configures a scan operation.
@@ -145,7 +161,19 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 	}
 
 	// 4. Build filesystem traversal tree
-	rootNode, fileNodes, walkErrors, err := tree.BuildTree(ctx, vol.VolumeID, vol.LastMountPoint, opts.TargetDir)
+	walkProgressHandler := func(wp tree.WalkProgress) {
+		if opts.ProgressFn != nil {
+			opts.ProgressFn(Progress{
+				Phase:          PhaseDiscovering,
+				EntriesScanned: wp.EntriesDiscovered,
+				FilesScanned:   wp.FilesDiscovered,
+				DirsScanned:    wp.DirsDiscovered,
+				Elapsed:        time.Since(startedAt),
+			})
+		}
+	}
+
+	rootNode, fileNodes, walkErrors, err := tree.BuildTreeWithProgress(ctx, vol.VolumeID, vol.LastMountPoint, opts.TargetDir, walkProgressHandler)
 	if err != nil {
 		return s.failScan(ctx, scanRun, summary, fmt.Sprintf("filesystem walk error: %v", err), opts.DryRun)
 	}
@@ -173,18 +201,64 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 	var totalEntriesScanned int64
 	var totalBytesScanned int64
 
+	totalFiles := int64(len(fileNodes))
+	var totalFileBytes int64
+	for _, fn := range fileNodes {
+		totalFileBytes += fn.SizeBytes
+	}
+
+	hashingStartedAt := time.Now()
+
 	reportProgress := func() {
 		if opts.ProgressFn != nil {
+			filesDone := atomic.LoadInt64(&summary.FilesCount)
+			bytesDone := atomic.LoadInt64(&totalBytesScanned)
+			bytesHashed := atomic.LoadInt64(&summary.BytesHashed)
+			fastHits := atomic.LoadInt64(&summary.FastHitsCount)
+			dirsDone := atomic.LoadInt64(&summary.DirsCount)
+			entriesDone := atomic.LoadInt64(&totalEntriesScanned)
+
+			var percent float64
+			if totalFiles > 0 {
+				percent = float64(filesDone) / float64(totalFiles) * 100.0
+				if percent > 100.0 {
+					percent = 100.0
+				}
+			} else {
+				percent = 100.0
+			}
+
+			var eta time.Duration
+			hashingElapsed := time.Since(hashingStartedAt)
+			if filesDone > 0 && totalFiles > filesDone && hashingElapsed > 100*time.Millisecond {
+				rate := float64(filesDone) / hashingElapsed.Seconds()
+				if rate > 0 {
+					remainingFiles := totalFiles - filesDone
+					eta = time.Duration(float64(remainingFiles)/rate) * time.Second
+				}
+			}
+
 			opts.ProgressFn(Progress{
-				EntriesScanned: atomic.LoadInt64(&totalEntriesScanned),
-				BytesScanned:   atomic.LoadInt64(&totalBytesScanned),
-				FilesScanned:   atomic.LoadInt64(&summary.FilesCount),
-				FastHits:       atomic.LoadInt64(&summary.FastHitsCount),
-				DirsScanned:    atomic.LoadInt64(&summary.DirsCount),
-				Elapsed:        time.Since(startedAt),
+				Phase:           PhaseProcessing,
+				EntriesScanned:  entriesDone,
+				BytesScanned:    bytesDone,
+				FilesScanned:    filesDone,
+				FastHits:        fastHits,
+				DirsScanned:     dirsDone,
+				TotalFiles:      totalFiles,
+				TotalBytes:      totalFileBytes,
+				FilesCompleted:  filesDone,
+				BytesCompleted:  bytesDone,
+				BytesHashed:     bytesHashed,
+				Elapsed:         time.Since(startedAt),
+				EstimatedRemain: eta,
+				Percent:         percent,
 			})
 		}
 	}
+
+	// Emit initial processing state
+	reportProgress()
 
 	// 7. Start batch writer goroutine
 	var writerWg sync.WaitGroup
@@ -441,6 +515,7 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 	// Close writer channel and wait for batch writer to flush
 	close(writerChan)
 	writerWg.Wait()
+	reportProgress()
 
 	if writerErr != nil {
 		return s.failScan(ctx, scanRun, summary, fmt.Sprintf("database write error: %v", writerErr), opts.DryRun)

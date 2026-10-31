@@ -526,3 +526,21 @@ func TestCLI_ExportImportWorkflow(t *testing.T) {
 		t.Errorf("expected /exported.txt, got %v", entries)
 	}
 }
+
+func TestFormatETA(t *testing.T) {
+	tests := []struct {
+		d        time.Duration
+		expected string
+	}{
+		{5 * time.Second, "5s"},
+		{65 * time.Second, "1m05s"},
+		{3665 * time.Second, "1h01m"},
+	}
+
+	for _, tt := range tests {
+		actual := formatETA(tt.d)
+		if actual != tt.expected {
+			t.Errorf("formatETA(%v) = %q, want %q", tt.d, actual, tt.expected)
+		}
+	}
+}

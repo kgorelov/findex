@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/model"
@@ -27,10 +28,22 @@ type Node struct {
 	PendingCount int32
 }
 
+// WalkProgress reports entry counts discovered during filesystem traversal.
+type WalkProgress struct {
+	EntriesDiscovered int64
+	FilesDiscovered   int64
+	DirsDiscovered    int64
+}
+
 // BuildTree walks the filesystem rooted at startDir and constructs a tree of Nodes.
 // It returns the root Node, a slice of all regular file nodes that need fingerprinting,
 // and any non-fatal walk warnings/errors encountered (such as permission denied on subdirectories).
 func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Node, []*Node, []string, error) {
+	return BuildTreeWithProgress(ctx, volumeID, mountPoint, startDir, nil)
+}
+
+// BuildTreeWithProgress walks the filesystem rooted at startDir, reporting discovery progress.
+func BuildTreeWithProgress(ctx context.Context, volumeID, mountPoint, startDir string, progressFn func(WalkProgress)) (*Node, []*Node, []string, error) {
 	absStart, err := filepath.Abs(startDir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get absolute path for %q: %w", startDir, err)
@@ -58,9 +71,25 @@ func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Nod
 	var fileNodes []*Node
 	var walkErrors []string
 
+	var entriesCount int64
+	var filesCount int64
+	var dirsCount int64
+
+	report := func() {
+		if progressFn != nil {
+			progressFn(WalkProgress{
+				EntriesDiscovered: atomic.LoadInt64(&entriesCount),
+				FilesDiscovered:   atomic.LoadInt64(&filesCount),
+				DirsDiscovered:    atomic.LoadInt64(&dirsCount),
+			})
+		}
+	}
+
 	if !rootNode.EntryType.IsDirectory() {
 		// Single file scan
+		atomic.AddInt64(&entriesCount, 1)
 		if rootNode.EntryType == model.EntryTypeRegular {
+			atomic.AddInt64(&filesCount, 1)
 			fileNodes = append(fileNodes, rootNode)
 		} else if rootNode.EntryType == model.EntryTypeSymlink {
 			target, err := os.Readlink(absStart)
@@ -69,18 +98,24 @@ func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Nod
 			}
 			rootNode.QuickFingerprint = fingerprint.ComputeSymlinkFingerprint(target)
 		}
+		report()
 		return rootNode, fileNodes, nil, nil
 	}
 
+	atomic.AddInt64(&entriesCount, 1)
+	atomic.AddInt64(&dirsCount, 1)
+	report()
+
 	// Recursively walk directory
-	if err := walkDir(ctx, rootNode, mountPoint, &fileNodes, &walkErrors); err != nil {
+	if err := walkDir(ctx, rootNode, mountPoint, &fileNodes, &walkErrors, &entriesCount, &filesCount, &dirsCount, report); err != nil {
 		return nil, nil, nil, err
 	}
 
+	report()
 	return rootNode, fileNodes, walkErrors, nil
 }
 
-func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[]*Node, walkErrors *[]string) error {
+func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[]*Node, walkErrors *[]string, entriesCount, filesCount, dirsCount *int64, report func()) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -133,9 +168,11 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 		}
 
 		dirNode.Children = append(dirNode.Children, childNode)
+		cEntries := atomic.AddInt64(entriesCount, 1)
 
 		switch entryType {
 		case model.EntryTypeRegular:
+			atomic.AddInt64(filesCount, 1)
 			*fileNodes = append(*fileNodes, childNode)
 
 		case model.EntryTypeSymlink:
@@ -147,12 +184,17 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 			childNode.QuickFingerprint = fingerprint.ComputeSymlinkFingerprint(target)
 
 		case model.EntryTypeDirectory:
-			if err := walkDir(ctx, childNode, mountPoint, fileNodes, walkErrors); err != nil {
+			atomic.AddInt64(dirsCount, 1)
+			if err := walkDir(ctx, childNode, mountPoint, fileNodes, walkErrors, entriesCount, filesCount, dirsCount, report); err != nil {
 				return err
 			}
 
 		default:
 			// Other types (FIFO, Socket, etc.): treated as zero-content or empty fingerprint
+		}
+
+		if cEntries%100 == 0 {
+			report()
 		}
 	}
 

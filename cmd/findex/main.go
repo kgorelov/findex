@@ -237,12 +237,38 @@ across multiple storage volumes in SQLite.`,
 				var lastReport time.Time
 				progressFn = func(p scan.Progress) {
 					now := time.Now()
-					if now.Sub(lastReport) < 200*time.Millisecond {
+					if p.Percent < 100 && now.Sub(lastReport) < 80*time.Millisecond {
 						return
 					}
 					lastReport = now
-					fmt.Fprintf(os.Stderr, "\rScanning: %d entries (%d files, %d dirs, %d fast hits) ...",
-						p.EntriesScanned, p.FilesScanned, p.DirsScanned, p.FastHits)
+
+					if p.Phase == scan.PhaseDiscovering {
+						fmt.Fprintf(os.Stderr, "\rScanning: %d entries (%d files, %d dirs) ...",
+							p.EntriesScanned, p.FilesScanned, p.DirsScanned)
+						return
+					}
+
+					barWidth := 25
+					completedBars := int((p.Percent / 100.0) * float64(barWidth))
+					if completedBars > barWidth {
+						completedBars = barWidth
+					}
+					if completedBars < 0 {
+						completedBars = 0
+					}
+
+					bar := strings.Repeat("=", completedBars)
+					if completedBars < barWidth {
+						bar += ">" + strings.Repeat(" ", barWidth-completedBars-1)
+					}
+
+					etaStr := "--"
+					if p.EstimatedRemain > 0 {
+						etaStr = formatETA(p.EstimatedRemain)
+					}
+
+					fmt.Fprintf(os.Stderr, "\r[%s] %5.1f%% (%d/%d files, ETA: %s) \033[K",
+						bar, p.Percent, p.FilesCompleted, p.TotalFiles, etaStr)
 				}
 			}
 
@@ -640,6 +666,22 @@ func parseEntryType(typeStr string) (model.EntryType, error) {
 	default:
 		return 0, fmt.Errorf("invalid entry type %q: must be one of 'all', 'file', 'dir'", typeStr)
 	}
+}
+
+func formatETA(d time.Duration) string {
+	d = d.Round(time.Second)
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	m := s / 60
+	s = s % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh%02dm", h, m)
 }
 
 func main() {
