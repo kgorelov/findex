@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
+	"github.com/kgorelov/findex/internal/compare"
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
 	"github.com/kgorelov/findex/internal/merge"
@@ -359,7 +361,129 @@ across multiple storage volumes in SQLite.`,
 	mergeCmd.Flags().BoolVar(&mergeDryRun, "dry-run", false, "Simulate merge without committing database changes")
 	rootCmd.AddCommand(mergeCmd)
 
+	// compare command
+	var compPresent []string
+	var compPreset []string
+	var compAbsent []string
+	var compCommon bool
+	var compType string
+	var compShowMatches bool
+	var compVerify bool
+
+	compareCmd := &cobra.Command{
+		Use:   "compare",
+		Short: "Compare content between volume sets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			present := compPresent
+			if len(present) == 0 && len(compPreset) > 0 {
+				present = compPreset
+			}
+
+			entryType, err := parseEntryType(compType)
+			if err != nil {
+				return err
+			}
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			mode := "absent"
+			if compCommon {
+				mode = "common"
+			}
+
+			summary, err := compare.Compare(context.Background(), db, compare.Options{
+				Present:        present,
+				Absent:         compAbsent,
+				Mode:           mode,
+				EntryType:      entryType,
+				ShowMatches:    compShowMatches,
+				VerifyFullHash: compVerify,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintCompareSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintCompareSummary(os.Stdout, summary)
+		},
+	}
+	compareCmd.Flags().StringSliceVar(&compPresent, "present", nil, "Source volume set (IDs or filters: host:X, label:X, uuid:X)")
+	compareCmd.Flags().StringSliceVar(&compPreset, "preset", nil, "Alias for --present")
+	compareCmd.Flags().StringSliceVar(&compAbsent, "absent", nil, "Target volume set to compare against")
+	compareCmd.Flags().BoolVar(&compCommon, "common", false, "Report common content present in both sets")
+	compareCmd.Flags().StringVar(&compType, "type", "all", "Filter entries by type (all, file, dir)")
+	compareCmd.Flags().BoolVar(&compShowMatches, "show-matches", false, "Include matching destination locations in report")
+	compareCmd.Flags().BoolVar(&compVerify, "verify", false, "Verify candidate matches using full fingerprints")
+	rootCmd.AddCommand(compareCmd)
+
+	// unique command
+	var uniqVol string
+	var uniqAmong []string
+	var uniqType string
+	var uniqShowMatches bool
+	var uniqVerify bool
+
+	uniqueCmd := &cobra.Command{
+		Use:   "unique",
+		Short: "Find content unique to a single volume among a set of volumes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if uniqVol == "" {
+				return fmt.Errorf("--volume <volume-id> is required")
+			}
+
+			entryType, err := parseEntryType(uniqType)
+			if err != nil {
+				return err
+			}
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			summary, err := compare.Unique(context.Background(), db, uniqVol, uniqAmong, compare.Options{
+				EntryType:      entryType,
+				ShowMatches:    uniqShowMatches,
+				VerifyFullHash: uniqVerify,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintCompareSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintCompareSummary(os.Stdout, summary)
+		},
+	}
+	uniqueCmd.Flags().StringVar(&uniqVol, "volume", "", "Volume to inspect for unique content (required)")
+	uniqueCmd.Flags().StringSliceVar(&uniqAmong, "among", nil, "Volumes to compare against (defaults to all other volumes)")
+	uniqueCmd.Flags().StringVar(&uniqType, "type", "all", "Filter entries by type (all, file, dir)")
+	uniqueCmd.Flags().BoolVar(&uniqShowMatches, "show-matches", false, "Include matching destination locations in report")
+	uniqueCmd.Flags().BoolVar(&uniqVerify, "verify", false, "Verify candidate matches using full fingerprints")
+	rootCmd.AddCommand(uniqueCmd)
+
 	return rootCmd
+}
+
+func parseEntryType(typeStr string) (model.EntryType, error) {
+	switch strings.ToLower(typeStr) {
+	case "file", "files", "regular":
+		return model.EntryTypeRegular, nil
+	case "dir", "dirs", "directory", "directories":
+		return model.EntryTypeDirectory, nil
+	case "all", "":
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("invalid entry type %q: must be one of 'all', 'file', 'dir'", typeStr)
+	}
 }
 
 func main() {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
@@ -245,5 +246,85 @@ func TestCLI_MergeWorkflow(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].RelativePath != "/remote/file.txt" {
 		t.Errorf("expected /remote/file.txt in merged entries, got %v", entries)
+	}
+}
+
+func TestCLI_CompareWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	now := time.Now().UTC()
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "vol1", FirstSeenAt: now}, false)
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "vol2", FirstSeenAt: now}, false)
+
+	_ = db.UpsertEntries(context.Background(), []*model.Entry{
+		{
+			VolumeID:         "vol1",
+			RelativePath:     "/data/file1.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        100,
+			QuickFingerprint: []byte("fp-file1"),
+		},
+		{
+			VolumeID:         "vol1",
+			RelativePath:     "/data/file2.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        200,
+			QuickFingerprint: []byte("fp-file2"),
+		},
+		{
+			VolumeID:         "vol2",
+			RelativePath:     "/backup/file1.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        100,
+			QuickFingerprint: []byte("fp-file1"),
+		},
+	})
+	db.Close()
+
+	cmd := buildRootCmd()
+	cmd.SetArgs([]string{"--db", dbFile, "compare", "--present", "vol1", "--absent", "vol2"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("findex compare failed: %v", err)
+	}
+
+	cmdJSON := buildRootCmd()
+	cmdJSON.SetArgs([]string{"--db", dbFile, "--json", "compare", "--present", "vol1", "--absent", "vol2", "--common"})
+	if err := cmdJSON.Execute(); err != nil {
+		t.Fatalf("findex compare --common failed: %v", err)
+	}
+}
+
+func TestCLI_UniqueWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	now := time.Now().UTC()
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "vA", FirstSeenAt: now}, false)
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "vB", FirstSeenAt: now}, false)
+
+	_ = db.UpsertEntries(context.Background(), []*model.Entry{
+		{
+			VolumeID:         "vA",
+			RelativePath:     "/unique.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        150,
+			QuickFingerprint: []byte("fp-unique"),
+		},
+	})
+	db.Close()
+
+	cmd := buildRootCmd()
+	cmd.SetArgs([]string{"--db", dbFile, "unique", "--volume", "vA", "--among", "vA,vB"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("findex unique failed: %v", err)
 	}
 }
