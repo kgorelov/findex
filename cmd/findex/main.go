@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kgorelov/findex/internal/compare"
+	"github.com/kgorelov/findex/internal/duplicate"
 	"github.com/kgorelov/findex/internal/export"
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
@@ -562,6 +563,52 @@ This command is syntax sugar for: findex compare --left volumes_set all_other_vo
 		},
 	}
 	rootCmd.AddCommand(lookupCmd)
+
+	// duplicates command
+	var dupType string
+	var dupMinSize int64
+
+	duplicatesCmd := &cobra.Command{
+		Use:   "duplicates [volumes_set]",
+		Short: "Find and group duplicate files and directories",
+		Long: `Find and group duplicate files and directories across a volume set (or all volumes).
+If an entire directory is a duplicate, the group contains just the directory entries
+and its descendant files are omitted. Groups are delimited with an empty line.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var selectors []string
+			if len(args) > 0 {
+				selectors = []string{args[0]}
+			}
+
+			entryType, err := parseEntryType(dupType)
+			if err != nil {
+				return err
+			}
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			summary, err := duplicate.FindDuplicates(context.Background(), db, selectors, duplicate.Options{
+				MinSizeBytes: dupMinSize,
+				EntryType:    entryType,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintDuplicateSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintDuplicateSummary(os.Stdout, summary)
+		},
+	}
+	duplicatesCmd.Flags().StringVar(&dupType, "type", "all", "Filter entries by type (all, file, dir)")
+	duplicatesCmd.Flags().Int64Var(&dupMinSize, "min-size", 1, "Minimum file size in bytes to consider for duplication")
+	rootCmd.AddCommand(duplicatesCmd)
 
 	// check command
 	checkCmd := &cobra.Command{

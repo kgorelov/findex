@@ -544,3 +544,83 @@ func TestFormatETA(t *testing.T) {
 		}
 	}
 }
+
+func TestCLI_DuplicatesWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	now := time.Now().UTC()
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "v1", Label: "Disk1", FirstSeenAt: now}, false)
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "v2", Label: "Disk2", FirstSeenAt: now}, false)
+
+	// Directory duplicate
+	_ = db.UpsertEntries(context.Background(), []*model.Entry{
+		{
+			VolumeID:             "v1",
+			RelativePath:         "/photos",
+			EntryType:            model.EntryTypeDirectory,
+			DirectoryFingerprint: []byte("fp-photos-1234567890123456789012"),
+		},
+		{
+			VolumeID:         "v1",
+			RelativePath:     "/photos/p.jpg",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        100,
+			QuickFingerprint: []byte("fp-p-jpg"),
+		},
+		{
+			VolumeID:             "v2",
+			RelativePath:         "/photos_bak",
+			EntryType:            model.EntryTypeDirectory,
+			DirectoryFingerprint: []byte("fp-photos-1234567890123456789012"),
+		},
+		{
+			VolumeID:         "v2",
+			RelativePath:     "/photos_bak/p.jpg",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        100,
+			QuickFingerprint: []byte("fp-p-jpg"),
+		},
+		// Standalone file duplicate
+		{
+			VolumeID:         "v1",
+			RelativePath:     "/standalone.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        200,
+			QuickFingerprint: []byte("fp-standalone"),
+		},
+		{
+			VolumeID:         "v2",
+			RelativePath:     "/standalone_copy.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        200,
+			QuickFingerprint: []byte("fp-standalone"),
+		},
+	})
+	db.Close()
+
+	// 1. findex duplicates (all volumes)
+	cmdAll := buildRootCmd()
+	cmdAll.SetArgs([]string{"--db", dbFile, "duplicates"})
+	if err := cmdAll.Execute(); err != nil {
+		t.Fatalf("findex duplicates failed: %v", err)
+	}
+
+	// 2. findex duplicates with volume set
+	cmdVol := buildRootCmd()
+	cmdVol.SetArgs([]string{"--db", dbFile, "duplicates", "v1,v2"})
+	if err := cmdVol.Execute(); err != nil {
+		t.Fatalf("findex duplicates v1,v2 failed: %v", err)
+	}
+
+	// 3. findex --json duplicates
+	cmdJSON := buildRootCmd()
+	cmdJSON.SetArgs([]string{"--db", dbFile, "--json", "duplicates"})
+	if err := cmdJSON.Execute(); err != nil {
+		t.Fatalf("findex --json duplicates failed: %v", err)
+	}
+}
