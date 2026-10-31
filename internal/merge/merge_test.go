@@ -617,3 +617,26 @@ func TestMerge_AlgorithmMismatch(t *testing.T) {
 		t.Fatalf("expected error on algorithm mismatch, got nil")
 	}
 }
+
+func TestMerge_ContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel context before/during merge
+
+	dest, _ := createTestDB(t, "dest_cancel.sqlite")
+	defer dest.Close()
+
+	src, srcPath := createTestDB(t, "src_cancel.sqlite")
+	_ = src.RegisterVolume(context.Background(), &model.Volume{VolumeID: "volCancelled", FirstSeenAt: time.Now().UTC()}, false)
+	src.Close()
+
+	_, err := Merge(ctx, dest, srcPath, Options{})
+	if err == nil {
+		t.Fatalf("expected error from cancelled context merge, got nil")
+	}
+
+	// Verify nothing was committed to dest
+	vols, _ := dest.ListVolumes(context.Background(), model.VolumeFilter{})
+	if len(vols) != 0 {
+		t.Errorf("expected 0 volumes committed after cancelled merge, got %d", len(vols))
+	}
+}

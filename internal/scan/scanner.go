@@ -136,10 +136,21 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		StartedAt: startedAt,
 	}
 
+	var scanErrors []string
+	var errMu sync.Mutex
+	recordError := func(e error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		scanErrors = append(scanErrors, e.Error())
+	}
+
 	// 4. Build filesystem traversal tree
-	rootNode, fileNodes, err := tree.BuildTree(ctx, vol.VolumeID, vol.LastMountPoint, opts.TargetDir)
+	rootNode, fileNodes, walkErrors, err := tree.BuildTree(ctx, vol.VolumeID, vol.LastMountPoint, opts.TargetDir)
 	if err != nil {
 		return s.failScan(ctx, scanRun, summary, fmt.Sprintf("filesystem walk error: %v", err), opts.DryRun)
+	}
+	for _, we := range walkErrors {
+		recordError(fmt.Errorf("%s", we))
 	}
 
 	// 5. Pre-load existing metadata for fast-path change detection
@@ -158,14 +169,6 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 	fileTaskChan := make(chan *tree.Node, opts.Workers*4)
 	fileDoneChan := make(chan *tree.Node, opts.Workers*4)
 	writerChan := make(chan *model.Entry, opts.BatchSize*4)
-
-	var scanErrors []string
-	var errMu sync.Mutex
-	recordError := func(e error) {
-		errMu.Lock()
-		defer errMu.Unlock()
-		scanErrors = append(scanErrors, e.Error())
-	}
 
 	var totalEntriesScanned int64
 	var totalBytesScanned int64

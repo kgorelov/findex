@@ -23,7 +23,7 @@ func BenchmarkBuildTree(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, err := BuildTree(context.Background(), "vol-bench", tempDir, tempDir)
+		_, _, _, err := BuildTree(context.Background(), "vol-bench", tempDir, tempDir)
 		if err != nil {
 			b.Fatalf("BuildTree failed: %v", err)
 		}

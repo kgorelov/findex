@@ -28,21 +28,22 @@ type Node struct {
 }
 
 // BuildTree walks the filesystem rooted at startDir and constructs a tree of Nodes.
-// It returns the root Node and a slice of all regular file nodes that need fingerprinting.
-func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Node, []*Node, error) {
+// It returns the root Node, a slice of all regular file nodes that need fingerprinting,
+// and any non-fatal walk warnings/errors encountered (such as permission denied on subdirectories).
+func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Node, []*Node, []string, error) {
 	absStart, err := filepath.Abs(startDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get absolute path for %q: %w", startDir, err)
+		return nil, nil, nil, fmt.Errorf("failed to get absolute path for %q: %w", startDir, err)
 	}
 
 	startStat, err := os.Lstat(absStart)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to stat scan root %q: %w", absStart, err)
+		return nil, nil, nil, fmt.Errorf("failed to stat scan root %q: %w", absStart, err)
 	}
 
 	relPath, err := model.ToVolumeRelativePath(mountPoint, absStart)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed mapping scan root to volume path: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed mapping scan root to volume path: %w", err)
 	}
 
 	rootNode := &Node{
@@ -55,6 +56,7 @@ func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Nod
 	}
 
 	var fileNodes []*Node
+	var walkErrors []string
 
 	if !rootNode.EntryType.IsDirectory() {
 		// Single file scan
@@ -63,22 +65,22 @@ func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Nod
 		} else if rootNode.EntryType == model.EntryTypeSymlink {
 			target, err := os.Readlink(absStart)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed reading symlink target: %w", err)
+				return nil, nil, nil, fmt.Errorf("failed reading symlink target: %w", err)
 			}
 			rootNode.QuickFingerprint = fingerprint.ComputeSymlinkFingerprint(target)
 		}
-		return rootNode, fileNodes, nil
+		return rootNode, fileNodes, nil, nil
 	}
 
 	// Recursively walk directory
-	if err := walkDir(ctx, rootNode, mountPoint, &fileNodes); err != nil {
-		return nil, nil, err
+	if err := walkDir(ctx, rootNode, mountPoint, &fileNodes, &walkErrors); err != nil {
+		return nil, nil, nil, err
 	}
 
-	return rootNode, fileNodes, nil
+	return rootNode, fileNodes, walkErrors, nil
 }
 
-func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[]*Node) error {
+func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[]*Node, walkErrors *[]string) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -87,7 +89,9 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 
 	entries, err := os.ReadDir(dirNode.FullPath)
 	if err != nil {
-		return fmt.Errorf("failed reading directory %q: %w", dirNode.FullPath, err)
+		*walkErrors = append(*walkErrors, fmt.Sprintf("failed reading directory %q: %v", dirNode.FullPath, err))
+		dirNode.PendingCount = 0
+		return nil
 	}
 
 	dirNode.PendingCount = int32(len(entries))
@@ -105,12 +109,16 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 		childPath := filepath.Join(dirNode.FullPath, entry.Name())
 		info, err := entry.Info()
 		if err != nil {
-			return fmt.Errorf("failed getting info for %q: %w", childPath, err)
+			*walkErrors = append(*walkErrors, fmt.Sprintf("failed getting info for %q: %v", childPath, err))
+			dirNode.PendingCount--
+			continue
 		}
 
 		relPath, err := model.ToVolumeRelativePath(mountPoint, childPath)
 		if err != nil {
-			return fmt.Errorf("failed mapping child path %q: %w", childPath, err)
+			*walkErrors = append(*walkErrors, fmt.Sprintf("failed mapping child path %q: %v", childPath, err))
+			dirNode.PendingCount--
+			continue
 		}
 
 		entryType := model.EntryTypeFromMode(info.Mode())
@@ -133,12 +141,13 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 		case model.EntryTypeSymlink:
 			target, err := os.Readlink(childPath)
 			if err != nil {
-				return fmt.Errorf("failed reading symlink %q: %w", childPath, err)
+				*walkErrors = append(*walkErrors, fmt.Sprintf("failed reading symlink %q: %v", childPath, err))
+				continue
 			}
 			childNode.QuickFingerprint = fingerprint.ComputeSymlinkFingerprint(target)
 
 		case model.EntryTypeDirectory:
-			if err := walkDir(ctx, childNode, mountPoint, fileNodes); err != nil {
+			if err := walkDir(ctx, childNode, mountPoint, fileNodes, walkErrors); err != nil {
 				return err
 			}
 

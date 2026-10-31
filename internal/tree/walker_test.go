@@ -36,7 +36,7 @@ func TestBuildTree(t *testing.T) {
 		t.Fatalf("failed creating symlink: %v", err)
 	}
 
-	rootNode, fileNodes, err := BuildTree(context.Background(), "vol-test", tempDir, tempDir)
+	rootNode, fileNodes, _, err := BuildTree(context.Background(), "vol-test", tempDir, tempDir)
 	if err != nil {
 		t.Fatalf("BuildTree failed: %v", err)
 	}

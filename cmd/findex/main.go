@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kgorelov/findex/internal/compare"
+	"github.com/kgorelov/findex/internal/export"
 	"github.com/kgorelov/findex/internal/fingerprint"
 	"github.com/kgorelov/findex/internal/index"
 	"github.com/kgorelov/findex/internal/merge"
@@ -469,6 +470,95 @@ across multiple storage volumes in SQLite.`,
 	uniqueCmd.Flags().BoolVar(&uniqShowMatches, "show-matches", false, "Include matching destination locations in report")
 	uniqueCmd.Flags().BoolVar(&uniqVerify, "verify", false, "Verify candidate matches using full fingerprints")
 	rootCmd.AddCommand(uniqueCmd)
+
+	// check command
+	checkCmd := &cobra.Command{
+		Use:   "check",
+		Short: "Run database integrity and inventory consistency checks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			summary, err := db.CheckIntegrity(context.Background())
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintCheckSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintCheckSummary(os.Stdout, summary)
+		},
+	}
+	rootCmd.AddCommand(checkCmd)
+
+	// export command
+	var expVol string
+	var expCompress bool
+	var expPretty bool
+
+	exportCmd := &cobra.Command{
+		Use:   "export <output-file>",
+		Short: "Export inventory metadata and entries to a portable JSON or gzip file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			outputPath := args[0]
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			summary, err := export.Export(context.Background(), db, outputPath, export.ExportOptions{
+				VolumeID:   expVol,
+				Compress:   expCompress,
+				IndentJSON: expPretty,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintExportSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintExportSummary(os.Stdout, summary)
+		},
+	}
+	exportCmd.Flags().StringVar(&expVol, "volume", "", "Filter export to a specific volume ID")
+	exportCmd.Flags().BoolVar(&expCompress, "compress", false, "Compress export with gzip (auto-detected if output ends with .gz)")
+	exportCmd.Flags().BoolVar(&expPretty, "pretty", true, "Indent JSON output for human readability")
+	rootCmd.AddCommand(exportCmd)
+
+	// import command
+	importCmd := &cobra.Command{
+		Use:   "import <input-file>",
+		Short: "Import inventory metadata and entries from a portable JSON or gzip file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			inputPath := args[0]
+
+			db, err := getDB()
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+
+			summary, err := export.Import(context.Background(), db, inputPath)
+			if err != nil {
+				return err
+			}
+
+			if jsonOut {
+				return output.PrintImportSummaryJSON(os.Stdout, summary)
+			}
+			return output.PrintImportSummary(os.Stdout, summary)
+		},
+	}
+	rootCmd.AddCommand(importCmd)
 
 	return rootCmd
 }

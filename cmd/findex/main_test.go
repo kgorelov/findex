@@ -328,3 +328,92 @@ func TestCLI_UniqueWorkflow(t *testing.T) {
 		t.Fatalf("findex unique failed: %v", err)
 	}
 }
+
+func TestCLI_CheckWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "volCheck", FirstSeenAt: time.Now().UTC()}, false)
+	db.Close()
+
+	cmd := buildRootCmd()
+	cmd.SetArgs([]string{"--db", dbFile, "check"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("findex check failed: %v", err)
+	}
+
+	cmdJSON := buildRootCmd()
+	cmdJSON.SetArgs([]string{"--db", dbFile, "--json", "check"})
+	if err := cmdJSON.Execute(); err != nil {
+		t.Fatalf("findex check --json failed: %v", err)
+	}
+}
+
+func TestCLI_ExportImportWorkflow(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile1 := filepath.Join(tempDir, "db1.sqlite")
+	dbFile2 := filepath.Join(tempDir, "db2.sqlite")
+	exportGz := filepath.Join(tempDir, "export.json.gz")
+
+	// Set up db1
+	db1, err := index.Open(dbFile1)
+	if err != nil {
+		t.Fatalf("failed opening db1: %v", err)
+	}
+	_ = db1.RegisterVolume(context.Background(), &model.Volume{
+		VolumeID:    "volExportCLI",
+		Label:       "ExportLabel",
+		FirstSeenAt: time.Now().UTC(),
+	}, false)
+	_ = db1.UpsertEntries(context.Background(), []*model.Entry{
+		{
+			VolumeID:         "volExportCLI",
+			RelativePath:     "/exported.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        88,
+			QuickFingerprint: []byte("fp-export-cli"),
+		},
+	})
+	db1.Close()
+
+	// 1. Export
+	cmdExp := buildRootCmd()
+	cmdExp.SetArgs([]string{"--db", dbFile1, "export", exportGz})
+	if err := cmdExp.Execute(); err != nil {
+		t.Fatalf("findex export failed: %v", err)
+	}
+
+	// 2. Import into db2
+	cmdImp := buildRootCmd()
+	cmdImp.SetArgs([]string{"--db", dbFile2, "import", exportGz})
+	if err := cmdImp.Execute(); err != nil {
+		t.Fatalf("findex import failed: %v", err)
+	}
+
+	// Verify db2 has data
+	db2, err := index.Open(dbFile2)
+	if err != nil {
+		t.Fatalf("failed opening db2: %v", err)
+	}
+	defer db2.Close()
+
+	v, err := db2.GetVolume(context.Background(), "volExportCLI")
+	if err != nil {
+		t.Fatalf("failed getting imported volume: %v", err)
+	}
+	if v.Label != "ExportLabel" {
+		t.Errorf("expected label ExportLabel, got %q", v.Label)
+	}
+
+	entries, err := db2.ListEntries(context.Background(), "volExportCLI", "")
+	if err != nil {
+		t.Fatalf("failed listing entries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].RelativePath != "/exported.txt" {
+		t.Errorf("expected /exported.txt, got %v", entries)
+	}
+}
