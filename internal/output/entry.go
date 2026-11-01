@@ -2,45 +2,49 @@ package output
 
 import (
 	"encoding/hex"
-	"fmt"
 	"io"
-	"text/tabwriter"
 
 	"github.com/kgorelov/findex/internal/model"
 )
 
-// PrintEntriesTable writes a tabular view of indexed entries to out.
-func PrintEntriesTable(out io.Writer, entries []*model.Entry) error {
+// PrintEntriesTable writes indexed entries to out according to opts.
+func PrintEntriesTable(out io.Writer, entries []*model.Entry, opts ...FormatOptions) error {
+	var opt FormatOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	if len(entries) == 0 {
-		fmt.Fprintln(out, "No entries found.")
 		return nil
 	}
 
-	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "TYPE\tSIZE\tPATH\tFINGERPRINT")
+	defaultCols := []string{"type", "size", "path", "fingerprint"}
 
+	var rows []Row
 	for _, e := range entries {
 		var fp string
 		if e.EntryType == model.EntryTypeDirectory {
 			if len(e.DirectoryFingerprint) > 0 {
-				fp = hex.EncodeToString(e.DirectoryFingerprint[:8]) + "..."
+				fp = hex.EncodeToString(e.DirectoryFingerprint[:8])
 			} else {
 				fp = "-"
 			}
 		} else if len(e.QuickFingerprint) > 0 {
-			fp = hex.EncodeToString(e.QuickFingerprint[:8]) + "..."
+			fp = hex.EncodeToString(e.QuickFingerprint[:8])
 		} else {
 			fp = "-"
 		}
 
-		sizeStr := "-"
-		if e.EntryType == model.EntryTypeRegular {
-			sizeStr = formatBytes(e.SizeBytes)
-		}
-
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			e.EntryType.String(), sizeStr, e.RelativePath, fp)
+		hasSize := e.EntryType == model.EntryTypeRegular
+		rows = append(rows, Row{
+			Type:        e.EntryType.String(),
+			SizeBytes:   e.SizeBytes,
+			HasSize:     hasSize,
+			Volume:      e.VolumeID,
+			Path:        e.RelativePath,
+			Fingerprint: fp,
+		})
 	}
 
-	return w.Flush()
+	return PrintRows(out, rows, defaultCols, opt)
 }

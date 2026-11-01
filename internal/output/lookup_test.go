@@ -31,7 +31,7 @@ func TestPrintLookupSummary(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := PrintLookupSummary(&buf, summary); err != nil {
+	if err := PrintLookupSummary(&buf, summary, FormatOptions{Verbose: true}); err != nil {
 		t.Fatalf("PrintLookupSummary failed: %v", err)
 	}
 
@@ -46,6 +46,18 @@ func TestPrintLookupSummary(t *testing.T) {
 		t.Errorf("expected matched path, got %q", out)
 	}
 
+	// Test non-verbose mode (no header text)
+	buf.Reset()
+	if err := PrintLookupSummary(&buf, summary, FormatOptions{Verbose: false}); err != nil {
+		t.Fatalf("PrintLookupSummary quiet failed: %v", err)
+	}
+	if strings.Contains(buf.String(), "Filepath Lookup:") {
+		t.Errorf("did not expect header in quiet mode, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "/photos/photo.jpg") {
+		t.Errorf("expected rows in quiet mode, got: %s", buf.String())
+	}
+
 	// Test zero matches
 	summaryEmpty := &model.LookupSummary{
 		Query:        "cafebabe",
@@ -54,7 +66,7 @@ func TestPrintLookupSummary(t *testing.T) {
 		MatchesCount: 0,
 	}
 	buf.Reset()
-	if err := PrintLookupSummary(&buf, summaryEmpty); err != nil {
+	if err := PrintLookupSummary(&buf, summaryEmpty, FormatOptions{Verbose: true}); err != nil {
 		t.Fatalf("PrintLookupSummary empty failed: %v", err)
 	}
 	if !strings.Contains(buf.String(), "No matching entries found") {

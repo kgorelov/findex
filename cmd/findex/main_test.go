@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -622,5 +623,167 @@ func TestCLI_DuplicatesWorkflow(t *testing.T) {
 	cmdJSON.SetArgs([]string{"--db", dbFile, "--json", "duplicates"})
 	if err := cmdJSON.Execute(); err != nil {
 		t.Fatalf("findex --json duplicates failed: %v", err)
+	}
+}
+
+func TestCLI_GrepFriendlyOutput(t *testing.T) {
+	tempDir := t.TempDir()
+	dbFile := filepath.Join(tempDir, "index.sqlite")
+
+	db, err := index.Open(dbFile)
+	if err != nil {
+		t.Fatalf("failed opening test db: %v", err)
+	}
+	now := time.Now().UTC()
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "volL", FirstSeenAt: now}, false)
+	_ = db.RegisterVolume(context.Background(), &model.Volume{VolumeID: "volR", FirstSeenAt: now}, false)
+
+	_ = db.UpsertEntries(context.Background(), []*model.Entry{
+		{
+			VolumeID:         "volL",
+			RelativePath:     "/docs/report.pdf",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        4096,
+			QuickFingerprint: []byte("0123456789abcdef0123456789abcdef"),
+		},
+		{
+			VolumeID:         "volR",
+			RelativePath:     "/backup/report.pdf",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        4096,
+			QuickFingerprint: []byte("0123456789abcdef0123456789abcdef"),
+		},
+		{
+			VolumeID:         "volL",
+			RelativePath:     "/docs/unique.txt",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        512,
+			QuickFingerprint: []byte("fedcba9876543210fedcba9876543210"),
+		},
+	})
+	db.Close()
+
+	// 1. compare --common default: quiet table with NO stats block
+	{
+		var buf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{"--db", dbFile, "compare", "--common", "volL", "volR"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("compare --common failed: %v", err)
+		}
+		out := buf.String()
+		if strings.Contains(out, "Volume Comparison") {
+			t.Errorf("did not expect 'Volume Comparison' in default quiet output, got:\n%s", out)
+		}
+		if !strings.Contains(out, "/docs/report.pdf") {
+			t.Errorf("expected entry path in quiet output, got:\n%s", out)
+		}
+		if strings.Contains(out, "...") {
+			t.Errorf("fingerprint must not contain '...', got:\n%s", out)
+		}
+	}
+
+	// 2. compare -v --common: verbose mode includes stats block
+	{
+		var buf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{"--db", dbFile, "-v", "compare", "--common", "volL", "volR"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("compare -v --common failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "Volume Comparison (--common") {
+			t.Errorf("expected stats block in verbose output, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Left Volumes:          volL") {
+			t.Errorf("expected left volumes in verbose output, got:\n%s", out)
+		}
+	}
+
+	// 3. compare --columns volume,path,size,type --common
+	{
+		var buf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{"--db", dbFile, "--columns", "volume,path,size,type", "compare", "--common", "volL", "volR"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("compare with --columns failed: %v", err)
+		}
+		out := buf.String()
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) < 2 {
+			t.Fatalf("expected at least header and row, got:\n%s", out)
+		}
+		header := lines[0]
+		if !strings.Contains(header, "VOLUME") || !strings.Contains(header, "PATH") || !strings.Contains(header, "SIZE") || !strings.Contains(header, "TYPE") {
+			t.Errorf("unexpected header: %s", header)
+		}
+	}
+
+	// 4. compare --format tsv --common
+	{
+		var buf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{"--db", dbFile, "--format", "tsv", "--columns", "volume,path", "compare", "--common", "volL", "volR"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("compare --format tsv failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "VOLUME\tPATH\nvolL\t/docs/report.pdf") {
+			t.Errorf("expected TSV output, got:\n%s", out)
+		}
+	}
+
+	// 5. compare --format csv and cvs alias
+	{
+		for _, f := range []string{"csv", "cvs"} {
+			var buf bytes.Buffer
+			cmd := buildRootCmd()
+			cmd.SetOut(&buf)
+			cmd.SetArgs([]string{"--db", dbFile, "--format", f, "--columns", "volume,path", "compare", "--common", "volL", "volR"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("compare --format %s failed: %v", f, err)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "VOLUME,PATH\nvolL,/docs/report.pdf") {
+				t.Errorf("expected CSV output for format %s, got:\n%s", f, out)
+			}
+		}
+	}
+
+	// 6. compare --format jsonl
+	{
+		var buf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{"--db", dbFile, "--format", "jsonl", "--columns", "volume,path,size", "compare", "--common", "volL", "volR"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("compare --format jsonl failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `"volume":"volL"`) || !strings.Contains(out, `"path":"/docs/report.pdf"`) {
+			t.Errorf("expected JSONL output, got:\n%s", out)
+		}
+	}
+
+	// 7. duplicates with group_id column and TSV format
+	{
+		var buf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{"--db", dbFile, "--format", "tsv", "--columns", "group_id,volume,path", "duplicates"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("duplicates --format tsv failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "GROUP_ID\tVOLUME\tPATH") {
+			t.Errorf("expected GROUP_ID in TSV header, got:\n%s", out)
+		}
+		if !strings.Contains(out, "1\tvolL\t/docs/report.pdf") {
+			t.Errorf("expected group_id 1 in TSV row, got:\n%s", out)
+		}
 	}
 }

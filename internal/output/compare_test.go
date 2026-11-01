@@ -41,8 +41,9 @@ func TestPrintCompareSummary(t *testing.T) {
 		},
 	}
 
+	// 1. Verbose mode: includes stats block
 	var buf bytes.Buffer
-	if err := PrintCompareSummary(&buf, summary); err != nil {
+	if err := PrintCompareSummary(&buf, summary, FormatOptions{Verbose: true}); err != nil {
 		t.Fatalf("failed printing compare summary: %v", err)
 	}
 
@@ -61,6 +62,61 @@ func TestPrintCompareSummary(t *testing.T) {
 	}
 	if !strings.Contains(out, "/missing/dir") {
 		t.Errorf("expected /missing/dir in items, got: %s", out)
+	}
+
+	// 2. Default (non-verbose) mode: no stats block, only table entries
+	buf.Reset()
+	if err := PrintCompareSummary(&buf, summary, FormatOptions{Verbose: false}); err != nil {
+		t.Fatalf("failed printing default compare summary: %v", err)
+	}
+	quietOut := buf.String()
+	if strings.Contains(quietOut, "Volume Comparison") {
+		t.Errorf("did not expect 'Volume Comparison' in quiet output, got: %s", quietOut)
+	}
+	if !strings.Contains(quietOut, "TYPE") || !strings.Contains(quietOut, "/missing/file1.txt") {
+		t.Errorf("expected table rows in quiet output, got: %s", quietOut)
+	}
+
+	// 3. Custom columns ordering: --columns volume,path,size,type
+	buf.Reset()
+	opts := FormatOptions{
+		Columns: []string{"volume", "path", "size", "type"},
+	}
+	if err := PrintCompareSummary(&buf, summary, opts); err != nil {
+		t.Fatalf("failed printing custom columns: %v", err)
+	}
+	colsOut := buf.String()
+	firstLine := strings.Split(colsOut, "\n")[0]
+	if !strings.Contains(firstLine, "VOLUME") || !strings.Contains(firstLine, "PATH") || !strings.Contains(firstLine, "SIZE") || !strings.Contains(firstLine, "TYPE") {
+		t.Errorf("expected custom header in first line, got: %s", firstLine)
+	}
+
+	// 4. TSV format
+	buf.Reset()
+	optsTSV := FormatOptions{
+		Format:  "tsv",
+		Columns: []string{"volume", "path"},
+	}
+	if err := PrintCompareSummary(&buf, summary, optsTSV); err != nil {
+		t.Fatalf("failed printing TSV: %v", err)
+	}
+	tsvOut := buf.String()
+	if !strings.Contains(tsvOut, "VOLUME\tPATH\nvolA\t/missing/file1.txt") {
+		t.Errorf("expected TSV output, got: %q", tsvOut)
+	}
+
+	// 5. CSV format
+	buf.Reset()
+	optsCSV := FormatOptions{
+		Format:  "csv",
+		Columns: []string{"volume", "path"},
+	}
+	if err := PrintCompareSummary(&buf, summary, optsCSV); err != nil {
+		t.Fatalf("failed printing CSV: %v", err)
+	}
+	csvOut := buf.String()
+	if !strings.Contains(csvOut, "VOLUME,PATH\nvolA,/missing/file1.txt") {
+		t.Errorf("expected CSV output, got: %q", csvOut)
 	}
 }
 

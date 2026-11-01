@@ -3,49 +3,55 @@ package output
 import (
 	"fmt"
 	"io"
-	"text/tabwriter"
 
 	"github.com/kgorelov/findex/internal/model"
 )
 
-// PrintDuplicateSummary writes duplicate groups delimited by an empty line to out.
-func PrintDuplicateSummary(out io.Writer, s *model.DuplicateSummary) error {
+// PrintDuplicateSummary writes duplicate groups to out according to opts.
+// Groups are delimited with an empty line. The table header is printed only once at the top.
+func PrintDuplicateSummary(out io.Writer, s *model.DuplicateSummary, opts ...FormatOptions) error {
+	var opt FormatOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	if s == nil || len(s.Groups) == 0 {
-		fmt.Fprintln(out, "No duplicate files or directories found.")
+		if opt.Format == "" || opt.Format == "table" {
+			fmt.Fprintln(out, "No duplicate files or directories found.")
+		}
 		return nil
 	}
 
-	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	for i, group := range s.Groups {
-		if i > 0 {
-			// Delimit groups with an empty line
-			fmt.Fprintln(out)
-		}
-
-		fmt.Fprintln(w, "TYPE\tSIZE\tVOLUME\tPATH\tFINGERPRINT")
-		for _, e := range group.Entries {
-			sizeStr := "-"
-			if e.SizeBytes > 0 || e.EntryType == model.EntryTypeRegular {
-				sizeStr = formatBytes(e.SizeBytes)
-			}
-
-			volStr := e.VolumeID
-			if e.VolumeLabel != "" {
-				volStr = fmt.Sprintf("%s (%s)", e.VolumeID, e.VolumeLabel)
-			}
-
-			fp := e.Fingerprint
-			if len(fp) > 16 {
-				fp = fp[:16] + "..."
-			}
-
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				e.EntryType.String(), sizeStr, volStr, e.RelativePath, fp)
-		}
-		_ = w.Flush()
+	if opt.Verbose {
+		fmt.Fprintf(out, "Duplicate Summary (%d groups, %d entries):\n\n", s.TotalGroups, s.TotalEntries)
 	}
 
-	return nil
+	defaultCols := []string{"group_id", "type", "size", "volume", "path", "fingerprint"}
+
+	var groups [][]Row
+	for i, group := range s.Groups {
+		groupID := i + 1
+		var groupRows []Row
+		for _, e := range group.Entries {
+			volStr := e.VolumeID
+			if (opt.Format == "" || opt.Format == "table") && e.VolumeLabel != "" {
+				volStr = fmt.Sprintf("%s (%s)", e.VolumeID, e.VolumeLabel)
+			}
+			hasSize := e.SizeBytes > 0 || e.EntryType == model.EntryTypeRegular
+			groupRows = append(groupRows, Row{
+				GroupID:     groupID,
+				Type:        e.EntryType.String(),
+				SizeBytes:   e.SizeBytes,
+				HasSize:     hasSize,
+				Volume:      volStr,
+				Path:        e.RelativePath,
+				Fingerprint: cleanFingerprint(e.Fingerprint),
+			})
+		}
+		groups = append(groups, groupRows)
+	}
+
+	return PrintGroupedRows(out, groups, defaultCols, opt)
 }
 
 // PrintDuplicateSummaryJSON writes machine-readable JSON duplicate summary to out.

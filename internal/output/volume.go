@@ -4,24 +4,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"text/tabwriter"
 	"time"
 
 	"github.com/kgorelov/findex/internal/model"
 )
 
-// PrintVolumesTable writes a tabular view of volumes to out.
-func PrintVolumesTable(out io.Writer, volumes []*model.Volume) error {
+// PrintVolumesTable writes a view of volumes to out according to opts.
+func PrintVolumesTable(out io.Writer, volumes []*model.Volume, opts ...FormatOptions) error {
+	var opt FormatOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	if len(volumes) == 0 {
-		fmt.Fprintln(out, "No volumes registered.")
+		if opt.Format == "" || opt.Format == "table" {
+			fmt.Fprintln(out, "No volumes registered.")
+		}
 		return nil
 	}
 
-	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "VOLUME ID\tLABEL\tFS UUID\tFS TYPE\tLAST MOUNT\tHOST\tFIRST SEEN")
+	defaultCols := []string{"volume", "label", "fs_uuid", "fs_type", "mount_point", "host"}
 
+	var rows []Row
 	for _, v := range volumes {
-		firstSeen := v.FirstSeenAt.Format("2006-01-02 15:04")
 		label := v.Label
 		if label == "" {
 			label = "-"
@@ -43,11 +48,17 @@ func PrintVolumesTable(out io.Writer, volumes []*model.Volume) error {
 			host = "-"
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			v.VolumeID, label, fsUUID, fsType, lastMount, host, firstSeen)
+		rows = append(rows, Row{
+			Volume:     v.VolumeID,
+			Label:      label,
+			FSUUID:     fsUUID,
+			FSType:     fsType,
+			MountPoint: lastMount,
+			Host:       host,
+		})
 	}
 
-	return w.Flush()
+	return PrintRows(out, rows, defaultCols, opt)
 }
 
 // PrintVolumeStats writes a detailed human-readable summary of a single volume to out.

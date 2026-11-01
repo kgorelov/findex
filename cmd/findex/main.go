@@ -25,9 +25,12 @@ import (
 )
 
 var (
-	dbPath     string
-	jsonOut    bool
-	cpuProfile string
+	dbPath      string
+	jsonOut     bool
+	cpuProfile  string
+	verbose     bool
+	columnsFlag string
+	formatFlag  string
 )
 
 func defaultDBPath() string {
@@ -43,6 +46,18 @@ func defaultDBPath() string {
 
 func getDB() (*index.DB, error) {
 	return index.Open(dbPath)
+}
+
+func getFormatOptions() (output.FormatOptions, error) {
+	fmtChoice, err := output.NormalizeFormat(formatFlag)
+	if err != nil {
+		return output.FormatOptions{}, err
+	}
+	return output.FormatOptions{
+		Format:  fmtChoice,
+		Columns: output.ParseColumns(columnsFlag),
+		Verbose: verbose,
+	}, nil
 }
 
 func buildRootCmd() *cobra.Command {
@@ -74,6 +89,9 @@ across multiple storage volumes in SQLite.`,
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", defaultDBPath(), "Path to SQLite index database")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output results in JSON format")
 	rootCmd.PersistentFlags().StringVar(&cpuProfile, "cpuprofile", "", "Write cpu profile to file")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output (display stats and detailed info)")
+	rootCmd.PersistentFlags().StringVar(&columnsFlag, "columns", "", "Comma-separated list of columns to display")
+	rootCmd.PersistentFlags().StringVar(&formatFlag, "format", "table", "Output format (table, tsv, csv, jsonl)")
 
 	// volume command group
 	volumeCmd := &cobra.Command{
@@ -102,10 +120,15 @@ across multiple storage volumes in SQLite.`,
 				return err
 			}
 
-			if jsonOut {
-				return output.PrintJSON(os.Stdout, volumes)
+			opts, err := getFormatOptions()
+			if err != nil {
+				return err
 			}
-			return output.PrintVolumesTable(os.Stdout, volumes)
+
+			if jsonOut {
+				return output.PrintJSON(cmd.OutOrStdout(), volumes)
+			}
+			return output.PrintVolumesTable(cmd.OutOrStdout(), volumes, opts)
 		},
 	}
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter volumes by source host")
@@ -130,9 +153,9 @@ across multiple storage volumes in SQLite.`,
 			}
 
 			if jsonOut {
-				return output.PrintJSON(os.Stdout, stats)
+				return output.PrintJSON(cmd.OutOrStdout(), stats)
 			}
-			return output.PrintVolumeStats(os.Stdout, stats)
+			return output.PrintVolumeStats(cmd.OutOrStdout(), stats)
 		},
 	}
 
@@ -357,10 +380,15 @@ across multiple storage volumes in SQLite.`,
 				return err
 			}
 
-			if jsonOut {
-				return output.PrintJSON(os.Stdout, entries)
+			opts, err := getFormatOptions()
+			if err != nil {
+				return err
 			}
-			return output.PrintEntriesTable(os.Stdout, entries)
+
+			if jsonOut {
+				return output.PrintJSON(cmd.OutOrStdout(), entries)
+			}
+			return output.PrintEntriesTable(cmd.OutOrStdout(), entries, opts)
 		},
 	}
 	filesCmd.Flags().StringVar(&filesVolID, "volume", "", "Volume ID to list entries from (required)")
@@ -482,10 +510,15 @@ Specifying one of the comparison options is mandatory (no defaults):
 				return err
 			}
 
-			if jsonOut {
-				return output.PrintCompareSummaryJSON(os.Stdout, summary)
+			opts, err := getFormatOptions()
+			if err != nil {
+				return err
 			}
-			return output.PrintCompareSummary(os.Stdout, summary)
+
+			if jsonOut {
+				return output.PrintCompareSummaryJSON(cmd.OutOrStdout(), summary)
+			}
+			return output.PrintCompareSummary(cmd.OutOrStdout(), summary, opts)
 		},
 	}
 	compareCmd.Flags().BoolVar(&compLeft, "left", false, "Display files/directories which exist only in the left volumes set")
@@ -541,10 +574,15 @@ This command is syntax sugar for: findex compare --left volumes_set all_other_vo
 				return err
 			}
 
-			if jsonOut {
-				return output.PrintCompareSummaryJSON(os.Stdout, summary)
+			opts, err := getFormatOptions()
+			if err != nil {
+				return err
 			}
-			return output.PrintCompareSummary(os.Stdout, summary)
+
+			if jsonOut {
+				return output.PrintCompareSummaryJSON(cmd.OutOrStdout(), summary)
+			}
+			return output.PrintCompareSummary(cmd.OutOrStdout(), summary, opts)
 		},
 	}
 	uniqCmd.Flags().StringVar(&uniqVol, "volume", "", "Volume or volume set (legacy flag)")
@@ -577,10 +615,15 @@ This command is syntax sugar for: findex compare --left volumes_set all_other_vo
 				return err
 			}
 
-			if jsonOut {
-				return output.PrintLookupSummaryJSON(os.Stdout, summary)
+			opts, err := getFormatOptions()
+			if err != nil {
+				return err
 			}
-			return output.PrintLookupSummary(os.Stdout, summary)
+
+			if jsonOut {
+				return output.PrintLookupSummaryJSON(cmd.OutOrStdout(), summary)
+			}
+			return output.PrintLookupSummary(cmd.OutOrStdout(), summary, opts)
 		},
 	}
 	rootCmd.AddCommand(lookupCmd)
@@ -621,10 +664,15 @@ and its descendant files are omitted. Groups are delimited with an empty line.`,
 				return err
 			}
 
-			if jsonOut {
-				return output.PrintDuplicateSummaryJSON(os.Stdout, summary)
+			opts, err := getFormatOptions()
+			if err != nil {
+				return err
 			}
-			return output.PrintDuplicateSummary(os.Stdout, summary)
+
+			if jsonOut {
+				return output.PrintDuplicateSummaryJSON(cmd.OutOrStdout(), summary)
+			}
+			return output.PrintDuplicateSummary(cmd.OutOrStdout(), summary, opts)
 		},
 	}
 	duplicatesCmd.Flags().StringVar(&dupType, "type", "all", "Filter entries by type (all, file, dir)")
