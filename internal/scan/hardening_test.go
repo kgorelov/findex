@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kgorelov/findex/internal/index"
+	"github.com/kgorelov/findex/internal/model"
 )
 
 func TestHardening_UnusualFilenames(t *testing.T) {
@@ -225,5 +226,43 @@ func TestHardening_DisappearingTarget(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error when scanning nonexistent target, got nil")
+	}
+}
+
+func TestHardening_ResilienceToFilesystemErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	db, err := index.Open(filepath.Join(tempDir, "index.sqlite"))
+	if err != nil {
+		t.Fatalf("failed opening db: %v", err)
+	}
+	defer db.Close()
+
+	scanDir := filepath.Join(tempDir, "resilient_test")
+	_ = os.MkdirAll(scanDir, 0755)
+
+	validFile1 := filepath.Join(scanDir, "valid1.txt")
+	_ = os.WriteFile(validFile1, []byte("valid content 1"), 0644)
+
+	validFile2 := filepath.Join(scanDir, "valid2.txt")
+	_ = os.WriteFile(validFile2, []byte("valid content 2"), 0644)
+
+	var reportedErrors []error
+	errorFn := func(e error) {
+		reportedErrors = append(reportedErrors, e)
+	}
+
+	scanner := New(db)
+	summary, err := scanner.Run(context.Background(), Options{
+		TargetDir: scanDir,
+		ErrorFn:   errorFn,
+	})
+	if err != nil {
+		t.Fatalf("expected scan to succeed, got: %v", err)
+	}
+	if summary.Status != model.ScanStatusCompleted {
+		t.Errorf("expected status completed, got %v", summary.Status)
+	}
+	if summary.FilesCount != 2 {
+		t.Errorf("expected 2 files indexed, got %d", summary.FilesCount)
 	}
 }

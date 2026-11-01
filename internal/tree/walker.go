@@ -35,18 +35,41 @@ type WalkProgress struct {
 	DirsDiscovered    int64
 }
 
+// WalkOptions configures filesystem traversal.
+type WalkOptions struct {
+	VolumeID   string
+	MountPoint string
+	StartDir   string
+	ProgressFn func(WalkProgress)
+	ErrorFn    func(error)
+}
+
 // BuildTree walks the filesystem rooted at startDir and constructs a tree of Nodes.
 // It returns the root Node, a slice of all regular file nodes that need fingerprinting,
 // and any non-fatal walk warnings/errors encountered (such as permission denied on subdirectories).
 func BuildTree(ctx context.Context, volumeID, mountPoint, startDir string) (*Node, []*Node, []string, error) {
-	return BuildTreeWithProgress(ctx, volumeID, mountPoint, startDir, nil)
+	return BuildTreeWithOptions(ctx, WalkOptions{
+		VolumeID:   volumeID,
+		MountPoint: mountPoint,
+		StartDir:   startDir,
+	})
 }
 
 // BuildTreeWithProgress walks the filesystem rooted at startDir, reporting discovery progress.
 func BuildTreeWithProgress(ctx context.Context, volumeID, mountPoint, startDir string, progressFn func(WalkProgress)) (*Node, []*Node, []string, error) {
-	absStart, err := filepath.Abs(startDir)
+	return BuildTreeWithOptions(ctx, WalkOptions{
+		VolumeID:   volumeID,
+		MountPoint: mountPoint,
+		StartDir:   startDir,
+		ProgressFn: progressFn,
+	})
+}
+
+// BuildTreeWithOptions walks the filesystem rooted at opts.StartDir according to WalkOptions.
+func BuildTreeWithOptions(ctx context.Context, opts WalkOptions) (*Node, []*Node, []string, error) {
+	absStart, err := filepath.Abs(opts.StartDir)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get absolute path for %q: %w", startDir, err)
+		return nil, nil, nil, fmt.Errorf("failed to get absolute path for %q: %w", opts.StartDir, err)
 	}
 
 	startStat, err := os.Lstat(absStart)
@@ -54,13 +77,13 @@ func BuildTreeWithProgress(ctx context.Context, volumeID, mountPoint, startDir s
 		return nil, nil, nil, fmt.Errorf("failed to stat scan root %q: %w", absStart, err)
 	}
 
-	relPath, err := model.ToVolumeRelativePath(mountPoint, absStart)
+	relPath, err := model.ToVolumeRelativePath(opts.MountPoint, absStart)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed mapping scan root to volume path: %w", err)
 	}
 
 	rootNode := &Node{
-		VolumeID:     volumeID,
+		VolumeID:     opts.VolumeID,
 		RelativePath: relPath,
 		FullPath:     absStart,
 		EntryType:    model.EntryTypeFromMode(startStat.Mode()),
@@ -76,8 +99,8 @@ func BuildTreeWithProgress(ctx context.Context, volumeID, mountPoint, startDir s
 	var dirsCount int64
 
 	report := func() {
-		if progressFn != nil {
-			progressFn(WalkProgress{
+		if opts.ProgressFn != nil {
+			opts.ProgressFn(WalkProgress{
 				EntriesDiscovered: atomic.LoadInt64(&entriesCount),
 				FilesDiscovered:   atomic.LoadInt64(&filesCount),
 				DirsDiscovered:    atomic.LoadInt64(&dirsCount),
@@ -107,7 +130,7 @@ func BuildTreeWithProgress(ctx context.Context, volumeID, mountPoint, startDir s
 	report()
 
 	// Recursively walk directory
-	if err := walkDir(ctx, rootNode, mountPoint, &fileNodes, &walkErrors, &entriesCount, &filesCount, &dirsCount, report); err != nil {
+	if err := walkDir(ctx, rootNode, opts.MountPoint, &fileNodes, &walkErrors, opts.ErrorFn, &entriesCount, &filesCount, &dirsCount, report); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -115,7 +138,7 @@ func BuildTreeWithProgress(ctx context.Context, volumeID, mountPoint, startDir s
 	return rootNode, fileNodes, walkErrors, nil
 }
 
-func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[]*Node, walkErrors *[]string, entriesCount, filesCount, dirsCount *int64, report func()) error {
+func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[]*Node, walkErrors *[]string, errFn func(error), entriesCount, filesCount, dirsCount *int64, report func()) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -124,7 +147,11 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 
 	entries, err := os.ReadDir(dirNode.FullPath)
 	if err != nil {
-		*walkErrors = append(*walkErrors, fmt.Sprintf("failed reading directory %q: %v", dirNode.FullPath, err))
+		wErr := fmt.Errorf("failed reading directory %q: %w", dirNode.FullPath, err)
+		*walkErrors = append(*walkErrors, wErr.Error())
+		if errFn != nil {
+			errFn(wErr)
+		}
 		dirNode.PendingCount = 0
 		return nil
 	}
@@ -144,7 +171,11 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 		childPath := filepath.Join(dirNode.FullPath, entry.Name())
 		info, err := entry.Info()
 		if err != nil {
-			*walkErrors = append(*walkErrors, fmt.Sprintf("failed getting info for %q: %v", childPath, err))
+			wErr := fmt.Errorf("failed getting info for %q: %w", childPath, err)
+			*walkErrors = append(*walkErrors, wErr.Error())
+			if errFn != nil {
+				errFn(wErr)
+			}
 			dirNode.PendingCount--
 			continue
 		}
@@ -178,14 +209,18 @@ func walkDir(ctx context.Context, dirNode *Node, mountPoint string, fileNodes *[
 		case model.EntryTypeSymlink:
 			target, err := os.Readlink(childPath)
 			if err != nil {
-				*walkErrors = append(*walkErrors, fmt.Sprintf("failed reading symlink %q: %v", childPath, err))
+				wErr := fmt.Errorf("failed reading symlink %q: %w", childPath, err)
+				*walkErrors = append(*walkErrors, wErr.Error())
+				if errFn != nil {
+					errFn(wErr)
+				}
 				continue
 			}
 			childNode.QuickFingerprint = fingerprint.ComputeSymlinkFingerprint(target)
 
 		case model.EntryTypeDirectory:
 			atomic.AddInt64(dirsCount, 1)
-			if err := walkDir(ctx, childNode, mountPoint, fileNodes, walkErrors, entriesCount, filesCount, dirsCount, report); err != nil {
+			if err := walkDir(ctx, childNode, mountPoint, fileNodes, walkErrors, errFn, entriesCount, filesCount, dirsCount, report); err != nil {
 				return err
 			}
 

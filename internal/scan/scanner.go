@@ -53,6 +53,7 @@ type Options struct {
 	StrictVerify bool // If true, force re-computing fingerprints regardless of metadata
 	DryRun       bool
 	ProgressFn   func(p Progress)
+	ErrorFn      func(err error)
 }
 
 // Summary contains final statistics and metadata for a completed or failed scan.
@@ -158,6 +159,9 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		errMu.Lock()
 		defer errMu.Unlock()
 		scanErrors = append(scanErrors, e.Error())
+		if opts.ErrorFn != nil {
+			opts.ErrorFn(e)
+		}
 	}
 
 	// 4. Build filesystem traversal tree
@@ -173,12 +177,20 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		}
 	}
 
-	rootNode, fileNodes, walkErrors, err := tree.BuildTreeWithProgress(ctx, vol.VolumeID, vol.LastMountPoint, opts.TargetDir, walkProgressHandler)
+	rootNode, fileNodes, walkErrors, err := tree.BuildTreeWithOptions(ctx, tree.WalkOptions{
+		VolumeID:   vol.VolumeID,
+		MountPoint: vol.LastMountPoint,
+		StartDir:   opts.TargetDir,
+		ProgressFn: walkProgressHandler,
+		ErrorFn:    opts.ErrorFn,
+	})
 	if err != nil {
 		return s.failScan(ctx, scanRun, summary, fmt.Sprintf("filesystem walk error: %v", err), opts.DryRun)
 	}
 	for _, we := range walkErrors {
-		recordError(fmt.Errorf("%s", we))
+		errMu.Lock()
+		scanErrors = append(scanErrors, we)
+		errMu.Unlock()
 	}
 
 	// 5. Pre-load existing metadata for fast-path change detection
@@ -322,6 +334,11 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 						atomic.AddInt64(&summary.UnstableFilesCount, 1)
 					}
 					recordError(fmt.Errorf("file fingerprint failed for %s: %w", node.FullPath, fpErr))
+					// Still forward node with empty fingerprints so parent directory resolution
+					// proceeds and entry is recorded in database
+					node.QuickFingerprint = nil
+					node.FullFingerprint = nil
+					fileDoneChan <- node
 					continue
 				}
 
@@ -521,14 +538,13 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		return s.failScan(ctx, scanRun, summary, fmt.Sprintf("database write error: %v", writerErr), opts.DryRun)
 	}
 
-	// 10. Check for scan errors
+	// 10. Record scan errors (non-fatal errors do not abort the scan)
 	summary.ErrorsCount = int64(len(scanErrors))
 	if len(scanErrors) > 0 {
-		errMsg := fmt.Sprintf("%d errors encountered during scan (first: %s)", len(scanErrors), scanErrors[0])
-		return s.failScan(ctx, scanRun, summary, errMsg, opts.DryRun)
+		summary.ErrorMessage = fmt.Sprintf("%d errors encountered during scan (first: %s)", len(scanErrors), scanErrors[0])
 	}
 
-	// 11. Success: Safe Reconciliation & Record Scan Root
+	// 11. Completion: Safe Reconciliation & Record Scan Root
 	completedAt := time.Now().UTC()
 	summary.CompletedAt = completedAt
 	summary.Duration = completedAt.Sub(startedAt)
@@ -548,7 +564,8 @@ func (s *Scanner) Run(ctx context.Context, opts Options) (*Summary, error) {
 		scanRun.Status = model.ScanStatusCompleted
 		scanRun.CompletedAt = &completedAt
 		scanRun.EntriesScanned = totalEntriesScanned
-		scanRun.ErrorsCount = 0
+		scanRun.ErrorsCount = summary.ErrorsCount
+		scanRun.ErrorMessage = summary.ErrorMessage
 		if err := s.db.UpdateScanRun(ctx, scanRun); err != nil {
 			return nil, fmt.Errorf("failed completing scan run record: %w", err)
 		}

@@ -66,6 +66,7 @@ func buildRootCmd() *cobra.Command {
 		Short: "Multi-Volume File Inventory and recovery-planning tool",
 		Long: `findex builds and maintains a persistent inventory of files and directories
 across multiple storage volumes in SQLite.`,
+		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cpuProfile != "" {
 				f, err := os.Create(cpuProfile)
@@ -317,6 +318,13 @@ across multiple storage volumes in SQLite.`,
 				}
 			}
 
+			var errorFn func(error)
+			if !jsonOut {
+				errorFn = func(err error) {
+					fmt.Fprintf(os.Stderr, "\r\033[KWarning: %v\n", err)
+				}
+			}
+
 			scanner := scan.New(db)
 			summary, err := scanner.Run(context.Background(), scan.Options{
 				VolumeID:     scanVolID,
@@ -328,6 +336,7 @@ across multiple storage volumes in SQLite.`,
 				StrictVerify: scanVerify,
 				DryRun:       scanDryRun,
 				ProgressFn:   progressFn,
+				ErrorFn:      errorFn,
 			})
 
 			if !jsonOut {
@@ -340,9 +349,9 @@ across multiple storage volumes in SQLite.`,
 			}
 
 			if jsonOut {
-				return output.PrintScanSummaryJSON(os.Stdout, summary)
+				return output.PrintScanSummaryJSON(cmd.OutOrStdout(), summary)
 			}
-			return output.PrintScanSummary(os.Stdout, summary)
+			return output.PrintScanSummary(cmd.OutOrStdout(), summary)
 		},
 	}
 	scanCmd.Flags().StringVar(&scanVolID, "volume", "", "Explicit volume ID (auto-discovered if omitted)")

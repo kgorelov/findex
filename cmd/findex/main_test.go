@@ -786,4 +786,21 @@ func TestCLI_GrepFriendlyOutput(t *testing.T) {
 			t.Errorf("expected group_id 1 in TSV row, got:\n%s", out)
 		}
 	}
+
+	// 8. Verify SilenceUsage: operational errors do not print help/usage message
+	{
+		var errBuf bytes.Buffer
+		cmd := buildRootCmd()
+		cmd.SetErr(&errBuf)
+		// Point to nonexistent directory for scan
+		cmd.SetArgs([]string{"--db", dbFile, "scan", "/nonexistent_test_dir_12345"})
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatalf("expected error scanning nonexistent dir, got nil")
+		}
+		errOut := errBuf.String()
+		if strings.Contains(errOut, "Usage:") {
+			t.Errorf("did not expect 'Usage:' help message on operational scan error, got:\n%s", errOut)
+		}
+	}
 }
