@@ -20,25 +20,34 @@ type RawDuplicateGroup struct {
 // QueryDuplicateDirectories retrieves candidate duplicate directory groups across the specified volume IDs.
 // Empty directories (matching the empty directory fingerprint) are automatically excluded.
 func (d *DB) QueryDuplicateDirectories(ctx context.Context, volumeIDs []string) ([]*RawDuplicateGroup, error) {
-	if len(volumeIDs) == 0 {
-		return nil, nil
-	}
-
 	emptyFP, _ := fingerprint.ComputeDirectoryFingerprint(nil)
 
-	placeholders := makePlaceholders(len(volumeIDs))
-	args := toAnySlice(volumeIDs)
+	var whereVolume string
+	var args []any
+	if len(volumeIDs) > 0 {
+		whereVolume = fmt.Sprintf("e.volume_id IN (%s) AND", makePlaceholders(len(volumeIDs)))
+		args = toAnySlice(volumeIDs)
+	}
+
+	args = append(args, emptyFP)
 
 	query := fmt.Sprintf(`
-		SELECT directory_fingerprint, COUNT(*)
-		FROM entries
-		WHERE volume_id IN (%s)
-		  AND entry_type = 2
-		  AND directory_fingerprint IS NOT NULL
-		  AND length(directory_fingerprint) > 0
-		GROUP BY directory_fingerprint
-		HAVING COUNT(*) >= 2
-	`, placeholders)
+		SELECT volume_id, label, source_host, relative_path, entry_type, hex_fp
+		FROM (
+			SELECT e.volume_id, COALESCE(v.label, '') AS label, COALESCE(v.source_host, '') AS source_host,
+			       e.relative_path, e.entry_type, hex(e.directory_fingerprint) AS hex_fp,
+			       COUNT(*) OVER (PARTITION BY e.directory_fingerprint) AS dup_count
+			FROM entries e
+			LEFT JOIN volumes v ON e.volume_id = v.volume_id
+			WHERE %s
+			      e.entry_type = 2
+			  AND e.directory_fingerprint IS NOT NULL
+			  AND length(e.directory_fingerprint) > 0
+			  AND e.directory_fingerprint != ?
+		)
+		WHERE dup_count >= 2
+		ORDER BY hex_fp, volume_id, relative_path
+	`, whereVolume)
 
 	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -46,114 +55,112 @@ func (d *DB) QueryDuplicateDirectories(ctx context.Context, volumeIDs []string) 
 	}
 	defer rows.Close()
 
-	var duplicateFPs [][]byte
+	var groups []*RawDuplicateGroup
+	var curGroup *RawDuplicateGroup
+
 	for rows.Next() {
-		var fp []byte
-		var count int
-		if err := rows.Scan(&fp, &count); err != nil {
-			return nil, fmt.Errorf("failed scanning duplicate directory group: %w", err)
+		var e model.DuplicateEntry
+		var eType int
+		var fpStr string
+		if err := rows.Scan(&e.VolumeID, &e.VolumeLabel, &e.SourceHost, &e.RelativePath, &eType, &fpStr); err != nil {
+			return nil, fmt.Errorf("failed scanning duplicate directory row: %w", err)
 		}
-		if len(emptyFP) > 0 && string(fp) == string(emptyFP) {
-			continue
+		e.EntryType = model.EntryType(eType)
+		e.Fingerprint = strings.ToLower(fpStr)
+
+		if curGroup == nil || curGroup.Fingerprint != e.Fingerprint {
+			if curGroup != nil && len(curGroup.Entries) >= 2 {
+				groups = append(groups, curGroup)
+			}
+			curGroup = &RawDuplicateGroup{
+				EntryType:   model.EntryTypeDirectory,
+				Fingerprint: e.Fingerprint,
+				Entries:     []*model.DuplicateEntry{&e},
+			}
+		} else {
+			curGroup.Entries = append(curGroup.Entries, &e)
 		}
-		duplicateFPs = append(duplicateFPs, fp)
+	}
+	if curGroup != nil && len(curGroup.Entries) >= 2 {
+		groups = append(groups, curGroup)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows.Close()
 
-	var groups []*RawDuplicateGroup
-	for _, fp := range duplicateFPs {
-		entriesQuery := fmt.Sprintf(`
-			SELECT e.volume_id, COALESCE(v.label, ''), COALESCE(v.source_host, ''),
-			       e.relative_path, e.entry_type, hex(e.directory_fingerprint)
-			FROM entries e
-			LEFT JOIN volumes v ON e.volume_id = v.volume_id
-			WHERE e.volume_id IN (%s)
-			  AND e.entry_type = 2
-			  AND e.directory_fingerprint = ?
-			ORDER BY e.volume_id, e.relative_path
-		`, placeholders)
-
-		entryArgs := append([]any(nil), args...)
-		entryArgs = append(entryArgs, fp)
-
-		eRows, err := d.db.QueryContext(ctx, entriesQuery, entryArgs...)
-		if err != nil {
-			return nil, fmt.Errorf("failed querying duplicate directory entries: %w", err)
-		}
-
-		var entries []*model.DuplicateEntry
-		var fpStr string
-		for eRows.Next() {
-			var e model.DuplicateEntry
-			var eType int
-			if err := eRows.Scan(&e.VolumeID, &e.VolumeLabel, &e.SourceHost, &e.RelativePath, &eType, &fpStr); err != nil {
-				eRows.Close()
-				return nil, fmt.Errorf("failed scanning duplicate directory entry: %w", err)
-			}
-			e.EntryType = model.EntryType(eType)
-			e.Fingerprint = strings.ToLower(fpStr)
-			entries = append(entries, &e)
-		}
-		eRows.Close()
-
-		if len(entries) < 2 {
+	// Calculate content size for each distinct duplicate directory group using indexed range queries
+	for _, group := range groups {
+		if len(group.Entries) == 0 {
 			continue
 		}
-
-		// Calculate total content size for one of the matching directories
-		firstEntry := entries[0]
-		var totalDirSize int64
-		var sizeQuery string
-		var sizeArgs []any
-		if firstEntry.RelativePath == "/" {
-			sizeQuery = `SELECT COALESCE(SUM(size_bytes), 0) FROM entries WHERE volume_id = ? AND entry_type = 1`
-			sizeArgs = []any{firstEntry.VolumeID}
-		} else {
-			sizeQuery = `SELECT COALESCE(SUM(size_bytes), 0) FROM entries WHERE volume_id = ? AND (relative_path = ? OR relative_path LIKE ? || '/%') AND entry_type = 1`
-			sizeArgs = []any{firstEntry.VolumeID, firstEntry.RelativePath, firstEntry.RelativePath}
+		firstEntry := group.Entries[0]
+		size, err := d.computeDirectoryContentSize(ctx, firstEntry.VolumeID, firstEntry.RelativePath)
+		if err != nil {
+			return nil, err
 		}
-		_ = d.db.QueryRowContext(ctx, sizeQuery, sizeArgs...).Scan(&totalDirSize)
-
-		for _, e := range entries {
-			e.SizeBytes = totalDirSize
+		group.SizeBytes = size
+		for _, e := range group.Entries {
+			e.SizeBytes = size
 		}
-
-		groups = append(groups, &RawDuplicateGroup{
-			EntryType:   model.EntryTypeDirectory,
-			SizeBytes:   totalDirSize,
-			Fingerprint: strings.ToLower(fpStr),
-			Entries:     entries,
-		})
 	}
 
 	return groups, nil
 }
 
-// QueryDuplicateFiles retrieves candidate duplicate file groups across the specified volume IDs.
-func (d *DB) QueryDuplicateFiles(ctx context.Context, volumeIDs []string, minSizeBytes int64) ([]*RawDuplicateGroup, error) {
-	if len(volumeIDs) == 0 {
-		return nil, nil
+// computeDirectoryContentSize computes the total size of all regular files contained within the given directory.
+func (d *DB) computeDirectoryContentSize(ctx context.Context, volumeID, relPath string) (int64, error) {
+	if relPath == "/" {
+		var total int64
+		err := d.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM entries WHERE volume_id = ? AND entry_type = 1`, volumeID).Scan(&total)
+		return total, err
 	}
 
-	placeholders := makePlaceholders(len(volumeIDs))
-	args := toAnySlice(volumeIDs)
+	prefix := relPath
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	prefixUpper := prefix[:len(prefix)-1] + "0" // '/' is ASCII 47, '0' is ASCII 48
+
+	var total int64
+	err := d.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(size_bytes), 0)
+		FROM entries
+		WHERE volume_id = ?
+		  AND relative_path >= ?
+		  AND relative_path < ?
+		  AND entry_type = 1
+	`, volumeID, prefix, prefixUpper).Scan(&total)
+	return total, err
+}
+
+// QueryDuplicateFiles retrieves candidate duplicate file groups across the specified volume IDs.
+func (d *DB) QueryDuplicateFiles(ctx context.Context, volumeIDs []string, minSizeBytes int64) ([]*RawDuplicateGroup, error) {
+	var whereVolume string
+	var args []any
+	if len(volumeIDs) > 0 {
+		whereVolume = fmt.Sprintf("e.volume_id IN (%s) AND", makePlaceholders(len(volumeIDs)))
+		args = toAnySlice(volumeIDs)
+	}
+
 	args = append(args, minSizeBytes)
 
 	query := fmt.Sprintf(`
-		SELECT quick_fingerprint, size_bytes, COUNT(*)
-		FROM entries
-		WHERE volume_id IN (%s)
-		  AND entry_type = 1
-		  AND size_bytes >= ?
-		  AND quick_fingerprint IS NOT NULL
-		  AND length(quick_fingerprint) > 0
-		GROUP BY quick_fingerprint, size_bytes
-		HAVING COUNT(*) >= 2
-		ORDER BY size_bytes DESC
-	`, placeholders)
+		SELECT volume_id, label, source_host, relative_path, entry_type, size_bytes, hex_fp
+		FROM (
+			SELECT e.volume_id, COALESCE(v.label, '') AS label, COALESCE(v.source_host, '') AS source_host,
+			       e.relative_path, e.entry_type, e.size_bytes, hex(e.quick_fingerprint) AS hex_fp,
+			       COUNT(*) OVER (PARTITION BY e.quick_fingerprint, e.size_bytes) AS dup_count
+			FROM entries e
+			LEFT JOIN volumes v ON e.volume_id = v.volume_id
+			WHERE %s
+			      e.entry_type = 1
+			  AND e.size_bytes >= ?
+			  AND e.quick_fingerprint IS NOT NULL
+			  AND length(e.quick_fingerprint) > 0
+		)
+		WHERE dup_count >= 2
+		ORDER BY size_bytes DESC, hex_fp, volume_id, relative_path
+	`, whereVolume)
 
 	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -161,73 +168,38 @@ func (d *DB) QueryDuplicateFiles(ctx context.Context, volumeIDs []string, minSiz
 	}
 	defer rows.Close()
 
-	type fileGroupKey struct {
-		quickFP   []byte
-		sizeBytes int64
-	}
-	var keys []fileGroupKey
+	var groups []*RawDuplicateGroup
+	var curGroup *RawDuplicateGroup
+
 	for rows.Next() {
-		var k fileGroupKey
-		var count int
-		if err := rows.Scan(&k.quickFP, &k.sizeBytes, &count); err != nil {
-			return nil, fmt.Errorf("failed scanning duplicate file group key: %w", err)
+		var e model.DuplicateEntry
+		var eType int
+		var fpStr string
+		if err := rows.Scan(&e.VolumeID, &e.VolumeLabel, &e.SourceHost, &e.RelativePath, &eType, &e.SizeBytes, &fpStr); err != nil {
+			return nil, fmt.Errorf("failed scanning duplicate file row: %w", err)
 		}
-		keys = append(keys, k)
+		e.EntryType = model.EntryType(eType)
+		e.Fingerprint = strings.ToLower(fpStr)
+
+		if curGroup == nil || curGroup.Fingerprint != e.Fingerprint || curGroup.SizeBytes != e.SizeBytes {
+			if curGroup != nil && len(curGroup.Entries) >= 2 {
+				groups = append(groups, curGroup)
+			}
+			curGroup = &RawDuplicateGroup{
+				EntryType:   model.EntryTypeRegular,
+				SizeBytes:   e.SizeBytes,
+				Fingerprint: e.Fingerprint,
+				Entries:     []*model.DuplicateEntry{&e},
+			}
+		} else {
+			curGroup.Entries = append(curGroup.Entries, &e)
+		}
+	}
+	if curGroup != nil && len(curGroup.Entries) >= 2 {
+		groups = append(groups, curGroup)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-	rows.Close()
-
-	volArgs := toAnySlice(volumeIDs)
-	var groups []*RawDuplicateGroup
-
-	for _, k := range keys {
-		entriesQuery := fmt.Sprintf(`
-			SELECT e.volume_id, COALESCE(v.label, ''), COALESCE(v.source_host, ''),
-			       e.relative_path, e.entry_type, e.size_bytes, hex(e.quick_fingerprint)
-			FROM entries e
-			LEFT JOIN volumes v ON e.volume_id = v.volume_id
-			WHERE e.volume_id IN (%s)
-			  AND e.entry_type = 1
-			  AND e.quick_fingerprint = ?
-			  AND e.size_bytes = ?
-			ORDER BY e.volume_id, e.relative_path
-		`, placeholders)
-
-		entryArgs := append([]any(nil), volArgs...)
-		entryArgs = append(entryArgs, k.quickFP, k.sizeBytes)
-
-		eRows, err := d.db.QueryContext(ctx, entriesQuery, entryArgs...)
-		if err != nil {
-			return nil, fmt.Errorf("failed querying duplicate file entries: %w", err)
-		}
-
-		var entries []*model.DuplicateEntry
-		var fpStr string
-		for eRows.Next() {
-			var e model.DuplicateEntry
-			var eType int
-			if err := eRows.Scan(&e.VolumeID, &e.VolumeLabel, &e.SourceHost, &e.RelativePath, &eType, &e.SizeBytes, &fpStr); err != nil {
-				eRows.Close()
-				return nil, fmt.Errorf("failed scanning duplicate file entry: %w", err)
-			}
-			e.EntryType = model.EntryType(eType)
-			e.Fingerprint = strings.ToLower(fpStr)
-			entries = append(entries, &e)
-		}
-		eRows.Close()
-
-		if len(entries) < 2 {
-			continue
-		}
-
-		groups = append(groups, &RawDuplicateGroup{
-			EntryType:   model.EntryTypeRegular,
-			SizeBytes:   k.sizeBytes,
-			Fingerprint: strings.ToLower(fpStr),
-			Entries:     entries,
-		})
 	}
 
 	return groups, nil

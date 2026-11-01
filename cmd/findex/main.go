@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -24,8 +25,9 @@ import (
 )
 
 var (
-	dbPath  string
-	jsonOut bool
+	dbPath     string
+	jsonOut    bool
+	cpuProfile string
 )
 
 func defaultDBPath() string {
@@ -49,10 +51,29 @@ func buildRootCmd() *cobra.Command {
 		Short: "Multi-Volume File Inventory and recovery-planning tool",
 		Long: `findex builds and maintains a persistent inventory of files and directories
 across multiple storage volumes in SQLite.`,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if cpuProfile != "" {
+				f, err := os.Create(cpuProfile)
+				if err != nil {
+					return fmt.Errorf("could not create CPU profile: %w", err)
+				}
+				if err := pprof.StartCPUProfile(f); err != nil {
+					f.Close()
+					return fmt.Errorf("could not start CPU profile: %w", err)
+				}
+			}
+			return nil
+		},
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			if cpuProfile != "" {
+				pprof.StopCPUProfile()
+			}
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", defaultDBPath(), "Path to SQLite index database")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output results in JSON format")
+	rootCmd.PersistentFlags().StringVar(&cpuProfile, "cpuprofile", "", "Write cpu profile to file")
 
 	// volume command group
 	volumeCmd := &cobra.Command{

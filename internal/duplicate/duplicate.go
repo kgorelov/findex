@@ -48,11 +48,7 @@ func FindDuplicates(ctx context.Context, db *index.DB, selectors []string, opts 
 	}
 
 	var acceptedDirGroups []*model.DuplicateGroup
-	type coveredPrefix struct {
-		volumeID string
-		prefix   string
-	}
-	var covered []coveredPrefix
+	coveredByVolume := make(map[string][]string)
 
 	// 1. Process duplicate directories if not filtering to files only
 	if opts.EntryType == 0 || opts.EntryType == model.EntryTypeDirectory {
@@ -71,8 +67,8 @@ func FindDuplicates(ctx context.Context, db *index.DB, selectors []string, opts 
 			allSubsumed := true
 			for _, e := range raw.Entries {
 				subsumed := false
-				for _, c := range covered {
-					if e.VolumeID == c.volumeID && strings.HasPrefix(e.RelativePath, c.prefix) {
+				for _, prefix := range coveredByVolume[e.VolumeID] {
+					if strings.HasPrefix(e.RelativePath, prefix) {
 						subsumed = true
 						break
 					}
@@ -104,10 +100,7 @@ func FindDuplicates(ctx context.Context, db *index.DB, selectors []string, opts 
 				} else if !strings.HasSuffix(p, "/") {
 					p += "/"
 				}
-				covered = append(covered, coveredPrefix{
-					volumeID: e.VolumeID,
-					prefix:   p,
-				})
+				coveredByVolume[e.VolumeID] = append(coveredByVolume[e.VolumeID], p)
 			}
 		}
 	}
@@ -124,12 +117,10 @@ func FindDuplicates(ctx context.Context, db *index.DB, selectors []string, opts 
 			var remaining []*model.DuplicateEntry
 			for _, e := range raw.Entries {
 				isCovered := false
-				for _, c := range covered {
-					if e.VolumeID == c.volumeID {
-						if c.prefix == "/" || strings.HasPrefix(e.RelativePath, c.prefix) {
-							isCovered = true
-							break
-						}
+				for _, prefix := range coveredByVolume[e.VolumeID] {
+					if prefix == "/" || strings.HasPrefix(e.RelativePath, prefix) {
+						isCovered = true
+						break
 					}
 				}
 				if !isCovered {
