@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,6 +82,15 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 	if err != nil {
 		return nil, fmt.Errorf("failed loading remote scan runs: %w", err)
 	}
+	remoteScanRunsByVolume := make(map[string][]*model.ScanRun)
+	for _, run := range remoteScanRuns {
+		remoteScanRunsByVolume[run.VolumeID] = append(remoteScanRunsByVolume[run.VolumeID], run)
+	}
+	for _, runs := range remoteScanRunsByVolume {
+		sort.Slice(runs, func(i, j int) bool {
+			return runs[i].StartedAt.Before(runs[j].StartedAt)
+		})
+	}
 
 	existingFingerprints, err := destDB.GetAllFingerprints(ctx)
 	if err != nil {
@@ -125,14 +135,7 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 		return nil, fmt.Errorf("failed recording initial merge run: %w", err)
 	}
 
-	// 4. Import all scan runs from source (preserves scan history and timestamps)
-	for _, run := range remoteScanRuns {
-		if err := tx.UpsertScanRun(ctx, run); err != nil {
-			return nil, fmt.Errorf("failed importing scan run %q: %w", run.ScanID, err)
-		}
-	}
-
-	// 5. Merge each remote volume
+	// 4. Merge each remote volume
 	for _, remoteVol := range remoteVolumesList {
 		localVol, exists := localVolumesByID[remoteVol.VolumeID]
 
@@ -257,6 +260,14 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 			localVolumesByID[remoteVol.VolumeID] = &mergedVol
 		}
 
+		// Import scan runs for this volume (preserves scan history and timestamps)
+		for _, run := range remoteScanRunsByVolume[remoteVol.VolumeID] {
+			if err := tx.UpsertScanRun(ctx, run); err != nil {
+				return nil, fmt.Errorf("failed importing scan run %q: %w", run.ScanID, err)
+			}
+			localScanRuns[run.ScanID] = run
+		}
+
 		// Import scan roots for this volume
 		remoteRoots, err := sourceDB.GetScanRoots(ctx, remoteVol.VolumeID)
 		if err != nil {
@@ -268,7 +279,7 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 			}
 		}
 
-		// 6. Merge entries for this volume
+		// 5. Merge entries for this volume
 		localEntriesList, err := tx.ListEntries(ctx, remoteVol.VolumeID)
 		if err != nil {
 			return nil, fmt.Errorf("failed listing local entries for volume %q: %w", remoteVol.VolumeID, err)
@@ -415,7 +426,7 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 	result.Duration = completedTime.Sub(startTime)
 	result.Status = "completed"
 
-	// 7. Record merge run summary
+	// 6. Record merge run summary
 	mergeRun := &model.MergeRun{
 		MergeID:                 mergeID,
 		SourcePath:              sourcePath,
@@ -433,7 +444,7 @@ func MergeDB(ctx context.Context, destDB *index.DB, sourceDB *index.DB, sourcePa
 		return nil, fmt.Errorf("failed recording merge run: %w", err)
 	}
 
-	// 8. Commit or rollback on dry run
+	// 7. Commit or rollback on dry run
 	if opts.DryRun {
 		_ = tx.Rollback()
 	} else {

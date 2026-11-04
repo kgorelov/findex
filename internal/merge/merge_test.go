@@ -640,3 +640,94 @@ func TestMerge_ContextCancelled(t *testing.T) {
 		t.Errorf("expected 0 volumes committed after cancelled merge, got %d", len(vols))
 	}
 }
+
+func TestMerge_NewVolumeWithScanRuns(t *testing.T) {
+	ctx := context.Background()
+
+	dest, _ := createTestDB(t, "dest_new_vol.sqlite")
+	defer dest.Close()
+
+	src, srcPath := createTestDB(t, "src_new_vol.sqlite")
+	defer src.Close()
+
+	vol := &model.Volume{
+		VolumeID:       "vol-remote-1",
+		Label:          "RemoteDisk",
+		FSUUID:         "remote-uuid-1234",
+		FSType:         "ext4",
+		FirstSeenAt:    time.Now().UTC(),
+		LastMountPoint: "/media/remote",
+	}
+	if err := src.RegisterVolume(ctx, vol, false); err != nil {
+		t.Fatalf("failed registering volume in src: %v", err)
+	}
+
+	tScan := time.Now().UTC().Add(-time.Hour)
+	scanRun := &model.ScanRun{
+		ScanID:         "scan-run-uuid-1",
+		VolumeID:       "vol-remote-1",
+		RootPath:       "/media/remote",
+		Status:         model.ScanStatusCompleted,
+		StartedAt:      tScan,
+		CompletedAt:    &tScan,
+		EntriesScanned: 1,
+	}
+	if err := src.CreateScanRun(ctx, scanRun); err != nil {
+		t.Fatalf("failed creating scan run in src: %v", err)
+	}
+
+	if err := src.RecordScanRootSuccess(ctx, "vol-remote-1", "/media/remote", "scan-run-uuid-1", tScan); err != nil {
+		t.Fatalf("failed creating scan root in src: %v", err)
+	}
+
+	entries := []*model.Entry{
+		{
+			VolumeID:         "vol-remote-1",
+			RelativePath:     "/pictures/photo.jpg",
+			EntryType:        model.EntryTypeRegular,
+			SizeBytes:        2048,
+			MTimeNs:          tScan.UnixNano(),
+			QuickFingerprint: []byte("photo-fp"),
+			LastSeenScanID:   "scan-run-uuid-1",
+		},
+	}
+	if err := src.UpsertEntries(ctx, entries); err != nil {
+		t.Fatalf("failed inserting entries into src: %v", err)
+	}
+	src.Close()
+
+	res, err := Merge(ctx, dest, srcPath, Options{})
+	if err != nil {
+		t.Fatalf("Merge failed: %v", err)
+	}
+
+	if res.VolumesMerged != 1 {
+		t.Errorf("expected 1 volume merged, got %d", res.VolumesMerged)
+	}
+	if res.EntriesInserted != 1 {
+		t.Errorf("expected 1 entry inserted, got %d", res.EntriesInserted)
+	}
+
+	// Verify scan run exists in dest
+	destRuns, err := dest.GetAllScanRuns(ctx)
+	if err != nil {
+		t.Fatalf("failed getting dest scan runs: %v", err)
+	}
+	if destRun, ok := destRuns["scan-run-uuid-1"]; !ok {
+		t.Errorf("expected scan-run-uuid-1 in dest DB, but not found")
+	} else if destRun.VolumeID != "vol-remote-1" {
+		t.Errorf("expected volume_id vol-remote-1, got %s", destRun.VolumeID)
+	}
+
+	// Verify entries exist in dest
+	destEntries, err := dest.ListEntries(ctx, "vol-remote-1", "")
+	if err != nil {
+		t.Fatalf("failed listing dest entries: %v", err)
+	}
+	if len(destEntries) != 1 {
+		t.Fatalf("expected 1 entry in dest, got %d", len(destEntries))
+	}
+	if destEntries[0].RelativePath != "/pictures/photo.jpg" {
+		t.Errorf("expected entry /pictures/photo.jpg, got %s", destEntries[0].RelativePath)
+	}
+}
