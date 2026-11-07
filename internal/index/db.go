@@ -105,6 +105,7 @@ func OpenReadOnly(path string) (*DB, error) {
 
 // Close closes the underlying database handle.
 func (d *DB) Close() error {
+	_, _ = d.db.Exec("PRAGMA optimize;")
 	return d.db.Close()
 }
 

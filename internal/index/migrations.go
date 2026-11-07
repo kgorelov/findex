@@ -150,6 +150,26 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version: 3,
+		name:    "compare_indexes",
+		up: func(ctx context.Context, tx *sql.Tx) error {
+			statements := []string{
+				`CREATE INDEX IF NOT EXISTS idx_entries_quick_fp_vol_size
+					ON entries(quick_fingerprint, volume_id, size_bytes);`,
+				`CREATE INDEX IF NOT EXISTS idx_entries_dir_fp_vol
+					ON entries(directory_fingerprint, volume_id);`,
+				`ANALYZE;`,
+			}
+
+			for _, stmt := range statements {
+				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					return fmt.Errorf("failed executing statement: %w\nSQL: %s", err, stmt)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // Migrate executes pending database migrations in a transaction.

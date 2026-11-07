@@ -102,29 +102,39 @@ func (d *DB) QueryComparison(ctx context.Context, params CompareQueryParams) (*m
 	absentPlaceholders := makePlaceholders(len(params.AbsentVolumes))
 	absentArgs := toAnySlice(params.AbsentVolumes)
 
-	// 2. Count matching entries in target
-	queryMatchCounts, matchArgs := buildMatchCountQuery(params, presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
-	err = d.db.QueryRowContext(ctx, queryMatchCounts, matchArgs...).Scan(
-		&summary.MatchingEntries,
-		&summary.MatchingBytes,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed querying matching counts: %w", err)
-	}
-
-	summary.AbsentEntries = summary.TotalSourceEntries - summary.MatchingEntries
-	summary.AbsentBytes = summary.TotalSourceBytes - summary.MatchingBytes
-
-	// 3. Load compared items based on Mode
+	// Load compared items based on Mode and compute match/absent totals directly from items
 	var items []model.CompareItem
 	if params.Mode == "common" {
 		items, err = d.queryCommonItems(ctx, params, presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
+		if err != nil {
+			return nil, err
+		}
+		var matchingBytes int64
+		for _, it := range items {
+			if it.EntryType == model.EntryTypeRegular {
+				matchingBytes += it.SizeBytes
+			}
+		}
+		summary.MatchingEntries = int64(len(items))
+		summary.MatchingBytes = matchingBytes
+		summary.AbsentEntries = summary.TotalSourceEntries - summary.MatchingEntries
+		summary.AbsentBytes = summary.TotalSourceBytes - summary.MatchingBytes
 	} else {
 		// "left", "right", or "unique"
 		items, err = d.queryAbsentItems(ctx, params, presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
-	}
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		var absentBytes int64
+		for _, it := range items {
+			if it.EntryType == model.EntryTypeRegular {
+				absentBytes += it.SizeBytes
+			}
+		}
+		summary.AbsentEntries = int64(len(items))
+		summary.AbsentBytes = absentBytes
+		summary.MatchingEntries = summary.TotalSourceEntries - summary.AbsentEntries
+		summary.MatchingBytes = summary.TotalSourceBytes - summary.AbsentBytes
 	}
 
 	summary.Items = items
@@ -166,64 +176,7 @@ func (d *DB) loadAllSourceItems(ctx context.Context, params CompareQueryParams, 
 }
 
 func (d *DB) queryAbsentItems(ctx context.Context, params CompareQueryParams, presentPlaceholders, absentPlaceholders string, presentArgs, absentArgs []any) ([]model.CompareItem, error) {
-	var conditions []string
-	var args []any
-	args = append(args, presentArgs...)
-
-	switch params.EntryType {
-	case model.EntryTypeRegular:
-		conditions = append(conditions, fmt.Sprintf(`
-			a.entry_type = 1 AND NOT EXISTS (
-				SELECT 1 FROM entries b
-				WHERE b.volume_id IN (%s)
-				  AND b.entry_type = 1
-				  AND b.size_bytes = a.size_bytes
-				  AND b.quick_fingerprint = a.quick_fingerprint
-			)
-		`, absentPlaceholders))
-		args = append(args, absentArgs...)
-
-	case model.EntryTypeDirectory:
-		conditions = append(conditions, fmt.Sprintf(`
-			a.entry_type = 2 AND a.directory_fingerprint IS NOT NULL AND NOT EXISTS (
-				SELECT 1 FROM entries b
-				WHERE b.volume_id IN (%s)
-				  AND b.entry_type = 2
-				  AND b.directory_fingerprint = a.directory_fingerprint
-			)
-		`, absentPlaceholders))
-		args = append(args, absentArgs...)
-
-	default:
-		conditions = append(conditions, fmt.Sprintf(`
-			(
-				(a.entry_type = 1 AND NOT EXISTS (
-					SELECT 1 FROM entries b
-					WHERE b.volume_id IN (%s)
-					  AND b.entry_type = 1
-					  AND b.size_bytes = a.size_bytes
-					  AND b.quick_fingerprint = a.quick_fingerprint
-				))
-				OR
-				(a.entry_type = 2 AND a.directory_fingerprint IS NOT NULL AND NOT EXISTS (
-					SELECT 1 FROM entries b
-					WHERE b.volume_id IN (%s)
-					  AND b.entry_type = 2
-					  AND b.directory_fingerprint = a.directory_fingerprint
-				))
-			)
-		`, absentPlaceholders, absentPlaceholders))
-		args = append(args, absentArgs...)
-		args = append(args, absentArgs...)
-	}
-
-	query := fmt.Sprintf(`
-		SELECT a.volume_id, a.relative_path, a.entry_type, a.size_bytes,
-		       a.quick_fingerprint, a.full_fingerprint, a.directory_fingerprint
-		FROM entries a
-		WHERE a.volume_id IN (%s) AND %s
-		ORDER BY a.volume_id, a.relative_path
-	`, presentPlaceholders, strings.Join(conditions, " AND "))
+	query, args := buildComparisonQuery(params, "NOT", presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
 
 	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -243,64 +196,7 @@ func (d *DB) queryAbsentItems(ctx context.Context, params CompareQueryParams, pr
 }
 
 func (d *DB) queryCommonItems(ctx context.Context, params CompareQueryParams, presentPlaceholders, absentPlaceholders string, presentArgs, absentArgs []any) ([]model.CompareItem, error) {
-	var conditions []string
-	var args []any
-	args = append(args, presentArgs...)
-
-	switch params.EntryType {
-	case model.EntryTypeRegular:
-		conditions = append(conditions, fmt.Sprintf(`
-			a.entry_type = 1 AND EXISTS (
-				SELECT 1 FROM entries b
-				WHERE b.volume_id IN (%s)
-				  AND b.entry_type = 1
-				  AND b.size_bytes = a.size_bytes
-				  AND b.quick_fingerprint = a.quick_fingerprint
-			)
-		`, absentPlaceholders))
-		args = append(args, absentArgs...)
-
-	case model.EntryTypeDirectory:
-		conditions = append(conditions, fmt.Sprintf(`
-			a.entry_type = 2 AND a.directory_fingerprint IS NOT NULL AND EXISTS (
-				SELECT 1 FROM entries b
-				WHERE b.volume_id IN (%s)
-				  AND b.entry_type = 2
-				  AND b.directory_fingerprint = a.directory_fingerprint
-			)
-		`, absentPlaceholders))
-		args = append(args, absentArgs...)
-
-	default:
-		conditions = append(conditions, fmt.Sprintf(`
-			(
-				(a.entry_type = 1 AND EXISTS (
-					SELECT 1 FROM entries b
-					WHERE b.volume_id IN (%s)
-					  AND b.entry_type = 1
-					  AND b.size_bytes = a.size_bytes
-					  AND b.quick_fingerprint = a.quick_fingerprint
-				))
-				OR
-				(a.entry_type = 2 AND a.directory_fingerprint IS NOT NULL AND EXISTS (
-					SELECT 1 FROM entries b
-					WHERE b.volume_id IN (%s)
-					  AND b.entry_type = 2
-					  AND b.directory_fingerprint = a.directory_fingerprint
-				))
-			)
-		`, absentPlaceholders, absentPlaceholders))
-		args = append(args, absentArgs...)
-		args = append(args, absentArgs...)
-	}
-
-	query := fmt.Sprintf(`
-		SELECT a.volume_id, a.relative_path, a.entry_type, a.size_bytes,
-		       a.quick_fingerprint, a.full_fingerprint, a.directory_fingerprint
-		FROM entries a
-		WHERE a.volume_id IN (%s) AND %s
-		ORDER BY a.volume_id, a.relative_path
-	`, presentPlaceholders, strings.Join(conditions, " AND "))
+	query, args := buildComparisonQuery(params, "", presentPlaceholders, absentPlaceholders, presentArgs, absentArgs)
 
 	rows, err := d.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -347,6 +243,95 @@ func (d *DB) queryCommonItems(ctx context.Context, params CompareQueryParams, pr
 	return items, nil
 }
 
+func buildComparisonQuery(params CompareQueryParams, existsOp string, presentPlaceholders, absentPlaceholders string, presentArgs, absentArgs []any) (string, []any) {
+	prefix := ""
+	if existsOp != "" {
+		prefix = existsOp + " "
+	}
+
+	switch params.EntryType {
+	case model.EntryTypeRegular:
+		query := fmt.Sprintf(`
+			SELECT a.volume_id, a.relative_path, a.entry_type, a.size_bytes,
+			       a.quick_fingerprint, a.full_fingerprint, a.directory_fingerprint
+			FROM entries a
+			WHERE a.volume_id IN (%s)
+			  AND a.entry_type = 1
+			  AND %sEXISTS (
+				SELECT 1 FROM entries b
+				WHERE b.volume_id IN (%s)
+				  AND +b.entry_type = 1
+				  AND b.size_bytes = a.size_bytes
+				  AND b.quick_fingerprint = a.quick_fingerprint
+			  )
+			ORDER BY a.volume_id, a.relative_path
+		`, presentPlaceholders, prefix, absentPlaceholders)
+		var args []any
+		args = append(args, presentArgs...)
+		args = append(args, absentArgs...)
+		return query, args
+
+	case model.EntryTypeDirectory:
+		query := fmt.Sprintf(`
+			SELECT a.volume_id, a.relative_path, a.entry_type, a.size_bytes,
+			       a.quick_fingerprint, a.full_fingerprint, a.directory_fingerprint
+			FROM entries a
+			WHERE a.volume_id IN (%s)
+			  AND a.entry_type = 2
+			  AND a.directory_fingerprint IS NOT NULL
+			  AND %sEXISTS (
+				SELECT 1 FROM entries b
+				WHERE b.volume_id IN (%s)
+				  AND +b.entry_type = 2
+				  AND b.directory_fingerprint = a.directory_fingerprint
+			  )
+			ORDER BY a.volume_id, a.relative_path
+		`, presentPlaceholders, prefix, absentPlaceholders)
+		var args []any
+		args = append(args, presentArgs...)
+		args = append(args, absentArgs...)
+		return query, args
+
+	default:
+		// UNION ALL splits the scan into files and directories, avoiding slow OR evaluation on every row
+		// and allowing SQLite to merge the sorted index streams.
+		query := fmt.Sprintf(`
+			SELECT a.volume_id, a.relative_path, a.entry_type, a.size_bytes,
+			       a.quick_fingerprint, a.full_fingerprint, a.directory_fingerprint
+			FROM entries a
+			WHERE a.volume_id IN (%s)
+			  AND a.entry_type = 1
+			  AND %sEXISTS (
+				SELECT 1 FROM entries b
+				WHERE b.volume_id IN (%s)
+				  AND +b.entry_type = 1
+				  AND b.size_bytes = a.size_bytes
+				  AND b.quick_fingerprint = a.quick_fingerprint
+			  )
+			UNION ALL
+			SELECT a.volume_id, a.relative_path, a.entry_type, a.size_bytes,
+			       a.quick_fingerprint, a.full_fingerprint, a.directory_fingerprint
+			FROM entries a
+			WHERE a.volume_id IN (%s)
+			  AND a.entry_type = 2
+			  AND a.directory_fingerprint IS NOT NULL
+			  AND %sEXISTS (
+				SELECT 1 FROM entries b
+				WHERE b.volume_id IN (%s)
+				  AND +b.entry_type = 2
+				  AND b.directory_fingerprint = a.directory_fingerprint
+			  )
+			ORDER BY volume_id, relative_path
+		`, presentPlaceholders, prefix, absentPlaceholders, presentPlaceholders, prefix, absentPlaceholders)
+		var args []any
+		args = append(args, presentArgs...)
+		args = append(args, absentArgs...)
+		args = append(args, presentArgs...)
+		args = append(args, absentArgs...)
+		return query, args
+	}
+}
+
 func (d *DB) lookupMatchingLocations(ctx context.Context, targetVolumes []string, entryType model.EntryType, sizeBytes int64, quickFP, fullFP []byte, dirFPStr string) ([]model.LocationRef, bool, error) {
 	placeholders := makePlaceholders(len(targetVolumes))
 	var args []any
@@ -358,7 +343,7 @@ func (d *DB) lookupMatchingLocations(ctx context.Context, targetVolumes []string
 			SELECT volume_id, relative_path, full_fingerprint
 			FROM entries
 			WHERE volume_id IN (%s)
-			  AND entry_type = 1
+			  AND +entry_type = 1
 			  AND size_bytes = ?
 			  AND quick_fingerprint = ?
 			ORDER BY volume_id, relative_path
@@ -370,7 +355,7 @@ func (d *DB) lookupMatchingLocations(ctx context.Context, targetVolumes []string
 			SELECT volume_id, relative_path, full_fingerprint
 			FROM entries
 			WHERE volume_id IN (%s)
-			  AND entry_type = 2
+			  AND +entry_type = 2
 			  AND directory_fingerprint = ?
 			ORDER BY volume_id, relative_path
 		`, placeholders)
@@ -416,7 +401,7 @@ func buildMatchCountQuery(params CompareQueryParams, presentPlaceholders, absent
 			a.entry_type = 1 AND EXISTS (
 				SELECT 1 FROM entries b
 				WHERE b.volume_id IN (%s)
-				  AND b.entry_type = 1
+				  AND +b.entry_type = 1
 				  AND b.size_bytes = a.size_bytes
 				  AND b.quick_fingerprint = a.quick_fingerprint
 			)
@@ -428,7 +413,7 @@ func buildMatchCountQuery(params CompareQueryParams, presentPlaceholders, absent
 			a.entry_type = 2 AND a.directory_fingerprint IS NOT NULL AND EXISTS (
 				SELECT 1 FROM entries b
 				WHERE b.volume_id IN (%s)
-				  AND b.entry_type = 2
+				  AND +b.entry_type = 2
 				  AND b.directory_fingerprint = a.directory_fingerprint
 			)
 		`, absentPlaceholders)
@@ -440,7 +425,7 @@ func buildMatchCountQuery(params CompareQueryParams, presentPlaceholders, absent
 				(a.entry_type = 1 AND EXISTS (
 					SELECT 1 FROM entries b
 					WHERE b.volume_id IN (%s)
-					  AND b.entry_type = 1
+					  AND +b.entry_type = 1
 					  AND b.size_bytes = a.size_bytes
 					  AND b.quick_fingerprint = a.quick_fingerprint
 				))
@@ -448,7 +433,7 @@ func buildMatchCountQuery(params CompareQueryParams, presentPlaceholders, absent
 				(a.entry_type = 2 AND a.directory_fingerprint IS NOT NULL AND EXISTS (
 					SELECT 1 FROM entries b
 					WHERE b.volume_id IN (%s)
-					  AND b.entry_type = 2
+					  AND +b.entry_type = 2
 					  AND b.directory_fingerprint = a.directory_fingerprint
 				))
 			)
